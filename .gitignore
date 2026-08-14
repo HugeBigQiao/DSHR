@@ -1,0 +1,18 @@
+# === Rust / Cargo 构建产物 ===
+# Cargo 编译输出目录，几十 MB 到 GB 级，绝不上传
+/target/
+
+# === 阶段 B：runtime 可执行文件 ===
+# 决策 6：不 commit 任何 .exe，runtime 属发布产物（Release asset / 安装包）
+runtime/
+*.exe
+
+# === 编辑器 / IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === 系统杂项 ===
+.DS_Store
+Thumbs.db
