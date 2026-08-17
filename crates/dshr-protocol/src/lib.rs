@@ -11,8 +11,24 @@ use serde::{Deserialize, Serialize};
 // - `rename_all = "kebab-case"`：把 Rust 变体名 `ToolCall` 自动转成 JSON 的 `"tool-call"`。
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ContentBlock {
-    // 这个变体携带一个字段 `text: String`，JSON 里就是 `{"type":"text","text":"..."}`。
-    Text { text: String },
+    Text {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ToolResult {
+        tool_call_id: String,
+        content: Vec<ContentBlock>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        is_error: Option<bool>,
+    },
 }
 
 #[cfg(test)] // cargo 测试模块
@@ -22,22 +38,56 @@ mod tests {
 
     // `#[test]`：标记这是测试函数，`cargo test` 会自动发现并运行它。
     #[test]
-    fn text_roundtrip() {
-        // 构造一个 Text 变体的值。
-        // `"...".to_string()`：把字符串字面量（&str）转成拥有所有权的 String。
-        let block = ContentBlock::Text {
-            text: "Hello, World!".to_string(),
-        };
-        // 序列化：把 Rust 值变成 JSON 字符串。
-        // `.unwrap()`：忽略可能的错误，直接取出结果（测试里失败就该 panic）。
-        let json = serde_json::to_string(&block).unwrap();
-        // 断言序列化结果**精确等于**这段 JSON。
-        // `r#"..."#`：raw string，里面的引号不用转义。
-        assert_eq!(json, r#"{"type":"text","text":"Hello, World!"}"#);
-        // 反序列化：把 JSON 字符串变回 Rust 值，`: ContentBlock` 指定目标类型。
-        let back: ContentBlock = serde_json::from_str(&json).unwrap();
-        // 断言"序列化→反序列化"后和原值相等（往返一致）。
-        // 能通过是因为上面 derive 了 PartialEq。
-        assert_eq!(back, block);
+    fn roundtrip() {
+        let cases: Vec<(ContentBlock, &str)> = vec![
+            (
+                ContentBlock::Text {
+                    text: "Hello, World!".to_string(),
+                },
+                r#"{"type":"text","text":"Hello, World!"}"#,
+            ),
+            (
+                ContentBlock::Reasoning {
+                    text: "思考过程".to_string(),
+                },
+                r#"{"type":"reasoning","text":"思考过程"}"#,
+            ),
+            (
+                ContentBlock::ToolCall {
+                    id: "1".to_string(),
+                    name: "tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                r#"{"type":"tool-call","id":"1","name":"tool","arguments":"{}"}"#,
+            ),
+            (
+                ContentBlock::ToolResult {
+                    tool_call_id: "1".to_string(),
+                    content: vec![],
+                    is_error: None,
+                },
+                r#"{"type":"tool-result","toolCallId":"1","content":[]}"#,
+            ),
+            (
+                ContentBlock::ToolResult {
+                    tool_call_id: "2".to_string(),
+                    content: vec![],
+                    is_error: Some(true),
+                },
+                r#"{"type":"tool-result","toolCallId":"2","content":[],"isError":true}"#,
+            ),
+            (
+                ContentBlock::ToolResult {
+                    tool_call_id: "3".to_string(),
+                    content: vec![],
+                    is_error: None,
+                },
+                r#"{"type":"tool-result","toolCallId":"3","content":[]}"#,
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(serde_json::to_string(&input).unwrap(), expected);
+            println!("input = {input:?}\nexpected = {expected:?}");
+        }
     }
 }
