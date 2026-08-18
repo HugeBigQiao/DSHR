@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/dshr-protocol",
-    "crates/dshr-runtime",
-    "crates/dshr-state",
-    "crates/dshr-ui",
+    "dshr-protocol",
+    "dshr-runtime",
+    "dshr-state",
+    "dshr-ui",
 ]
 
 [workspace.package]

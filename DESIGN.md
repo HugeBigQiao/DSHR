@@ -30,48 +30,47 @@
 
 ```
 dshr/
-├── Cargo.toml                # workspace
-├── crates/
-│   ├── dshr-protocol/        # ① 纯协议 port：类型 + transport，无 I/O 副作用
-│   │   └── src/
-│   │       ├── rpc.rs            # JSON-RPC 帧（Request/Response/Notification）
-│   │       ├── transport.rs      # 换行分隔 transport（≈ transport.ts，~200 行）
-│   │       ├── requests.rs       # initialize / session/prompt / shutdown
-│   │       ├── notifications.rs  # 4 个 server→client 通知
-│   │       ├── session_event.rs  # SessionEvent（13 事件类型判别联合）
-│   │       ├── content_block.rs  # ContentBlock（5 变体判别联合）
-│   │       ├── message.rs        # User/Assistant/ToolResultMessage + StreamChunk
-│   │       └── llm.rs            # TokenUsage / FinishReason / EpochHeader 等
-│   ├── dshr-runtime/         # ② 子进程管理 + HarnessClient（依赖 tokio）
-│   │   └── src/
-│   │       ├── client.rs         # HarnessClient（≈ client.ts 的 Rust 版）
-│   │       ├── spawn.rs          # 定位 runtime：exe 优先，node 显式回退
-│   │       ├── dispose.rs        # EOF→SIGTERM→SIGKILL 阶梯 + 崩溃恢复
-│   │       └── subscriptions.rs  # 通知订阅/过滤（含 session 树血缘）
-│   ├── dshr-state/           # ③ 应用状态：会话树 + event 缓存 + 监管聚合（纯逻辑）
-│   │   └── src/
-│   │       ├── session_tree.rs   # subagent.started 血缘 → 会话父子关系
-│   │       ├── event_log.rs      # 内存 event 序列（seq 单调）
-│   │       ├── log_reader.rs     # 历史日志直读：zstd frame 切分 + packed row 解码 + header 识别
-│   │       └── accounting.rs     # token 聚合 + 离线算账（token × 定价表）
-│   └── dshr-ui/              # ④ Iced UI（bin target）
-│       └── src/
-│           ├── main.rs           # 入口
-│           ├── app.rs            # Elm Model/Message/update/view
-│           ├── bridge.rs         # tokio runtime ↔ Iced Subscription 桥接
-│           ├── theme.rs
-│           ├── views/
-│           │   ├── chat.rs       # 聊天视图（流式）
-│           │   ├── workspace.rs  # 工作区/会话列表
-│           │   ├── supervisor.rs # 监管面板（token/工具/时序）
-│           │   └── settings.rs   # provider/model/runtime 路径/API key
-│           └── widgets/
-│               ├── message_list.rs  # 消息列表（虚拟化，见风险 R1）
-│               └── tool_call.rs     # 工具调用折叠卡片
+├── Cargo.toml                # workspace（members 平铺在根目录）
+├── dshr-protocol/            # ① 纯协议 port：类型 + transport，无 I/O 副作用
+│   └── src/
+│       ├── lib.rs                # pub mod 汇总
+│       ├── session_event.rs      # SessionEvent（信封 + 事件数据 + Unknown fallback）
+│       ├── content_block.rs      # ContentBlock（5 变体判别联合 + fallback）
+│       ├── message.rs            # User/Assistant/ToolResultMessage + StreamChunk
+│       └── llm.rs                # TokenUsage / FinishReason / EpochHeader 等
+├── dshr-runtime/             # ② 子进程管理 + HarnessClient（依赖 tokio）
+│   ├── src/
+│   │   ├── lib.rs
+│   │   └── client.rs             # HarnessClient（≈ client.ts 的 Rust 版）
+│   │                              #   spawn/initialize/prompt/shutdown 已落地
+│   └── tests/
+│       └── init_smoke.rs         # spawn → initialize → session/prompt → shutdown
+├── dshr-state/               # ③ 应用状态：会话树 + event 缓存 + 监管聚合（纯逻辑）
+│   └── src/
+│       ├── session_tree.rs   # subagent.started 血缘 → 会话父子关系
+│       ├── event_log.rs      # 内存 event 序列（seq 单调）
+│       ├── log_reader.rs     # 历史日志直读：zstd frame 切分 + packed row 解码 + header 识别
+│       └── accounting.rs     # token 聚合 + 离线算账（token × 定价表）
+├── dshr-ui/                  # ④ Iced UI（bin target）
+│   └── src/
+│       ├── main.rs           # 入口
+│       ├── app.rs            # Elm Model/Message/update/view
+│       ├── bridge.rs         # tokio runtime ↔ Iced Subscription 桥接
+│       ├── theme.rs
+│       ├── views/
+│       │   ├── chat.rs       # 聊天视图（流式）
+│       │   ├── workspace.rs  # 工作区/会话列表
+│       │   ├── supervisor.rs # 监管面板（token/工具/时序）
+│       │   └── settings.rs   # provider/model/runtime 路径/API key
+│       └── widgets/
+│           ├── message_list.rs  # 消息列表（虚拟化，见风险 R1）
+│           └── tool_call.rs     # 工具调用折叠卡片
 ├── runtime-manifest.json     # runtime 版本 pin + 获取方式（阶段 B 用）
 ├── scripts/fetch-runtime.ps1 # 阶段 B：下载官方 wheel 或本地构建 exe
 └── .github/workflows/release.yml  # 阶段 B：CI 产 exe + NOTICE + 安装包
 ```
+
+> 注：`spawn.rs`（exe 优先/node 回退定位）、`dispose.rs`（EOF→SIGTERM→SIGKILL 阶梯）、`subscriptions.rs` 为规划中的模块，当前 `client.rs` 已含 spawn/initialize/prompt/shutdown。
 
 **依赖方向**：`dshr-ui → dshr-state → dshr-runtime → dshr-protocol`（protocol 是地基，零依赖）。
 
@@ -93,9 +92,13 @@ transport ≈ `transport.ts` 逻辑，Rust 里 ~200 行，用 `tokio::io::BufRea
 
 ### 4.2 富类型（port 工作量主体，已查实）
 
-**`SessionEvent`**（`packages/core/session`，13 事件类型的判别联合，每个带 `type/seq/time/data` + 可选 `ignorable/sourceEventSeqs/surfaceOp`）：
+**`SessionEvent`**（`packages/core/session`，判别联合，每个带 `type/seq/time/data` + 可选 `ignorable/sourceEventSeqs/surfaceOp`）：
 
-`turn/start` `turn/end` `step/start` `step/end` `user/message` `assistant/chunk` `assistant/message` `tool/call` `tool/result` `todo/write` `request/header` `request/context` `session/end-seed`
+官方 `known-event-types.ts` 已声明 **45 种**事件（merge-extensible，会继续变）。核心 13 种 + 扩展两类：
+
+核心 13 种：`turn/start` `turn/end` `step/start` `step/end` `user/message` `assistant/chunk` `assistant/message` `tool/call` `tool/result` `todo/write` `request/header` `request/context` `session/end-seed`
+
+扩展示例（实测已见 `agent/inbox/spliced`）：`tool-workflow/run-start` `tool-workflow/run-end` `approval/asked` `approval/decided` `compaction/start` `compaction/end` `hook/invoked` `command/run` `command/done` `session/title` `goal/change` `plan/mode` `feedback/record` `schedule/change` `llm/retry` `sandbox/mode` `subagent/descriptor` `agent-preset/selected` `permission/preset` `web/deepseek-search-llm-request` …
 
 **`ContentBlock`**（`packages/llm`，5 变体）：`text` `reasoning` `image` `tool-call` `tool-result`
 
@@ -106,7 +109,7 @@ transport ≈ `transport.ts` 逻辑，Rust 里 ~200 行，用 `tokio::io::BufRea
 ### 4.3 port 关键决策（两个坑，必须先定）
 
 1. **判别联合用 serde 的 `#[serde(tag = "type")]`**：`SessionEvent` 和 `ContentBlock` 都是 `type` 字段打标的 discriminated union，Rust 用内部 tagged enum 天然表达。
-2. **merge-extensible 必须宽容**：TS 里 `SessionEventMap` 和 `ContentBlockMap` 都是 **plugin 可扩展**的（工具插件能注册新事件类型/新 content block 类型）。Rust port 不能只硬编码 13+5 种，必须留 **unknown fallback variant**（`#[serde(other)]` + 保留原始 JSON），否则 runtime 装了某个产生新事件类型的插件时，dshr 解析 `session.event` 直接崩。**这是 port 最容易翻车的地方。**
+2. **merge-extensible 必须宽容**：TS 里 `SessionEventMap` 和 `ContentBlockMap` 都是 **plugin 可扩展**的（工具插件能注册新事件类型/新 content block 类型）。Rust port 不能只硬编码 45+5 种，必须留 **unknown fallback variant**（手写 `Deserialize`：先解成通用信封，再按 `type` 分发，未知类型保留原始 JSON）——否则 runtime 装了某个产生新事件类型的插件时，dshr 解析 `session.event` 直接崩。**这是 port 最容易翻车的地方。**（注意 `ignorable` 语义：未知 + `ignorable:true` 可安全跳过；未知且无标记时官方语义要求拒绝重建。）
 
 ### 4.4 监管面板三视图（数据主权核心）
 
