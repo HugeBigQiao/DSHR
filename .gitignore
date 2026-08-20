@@ -7,6 +7,15 @@
 runtime/
 *.exe
 
+# === 本地配置与临时目录 ===
+# 敏感配置（API key 等），绝不提交
+.env
+.env.*
+!.env.example
+
+# 冒烟/测试用工作目录
+.tmp-ws/
+
 # === 编辑器 / IDE ===
 .vscode/
 .idea/

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "dshr-data",
     "dshr-protocol",
     "dshr-runtime",
     "dshr-state",
@@ -11,8 +12,11 @@ members = [
 edition = "2024"
 
 [workspace.dependencies]
+dotenvy = "0.15"
 iced = "0.14"
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
 similar = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }

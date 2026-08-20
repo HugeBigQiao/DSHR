@@ -1,11 +1,10 @@
 [package]
-name = "dshr-runtime"
+name = "dshr-data"
 version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
 dshr-protocol = { path = "../dshr-protocol" }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }

@@ -1,96 +1,67 @@
-use std::io::{Error, ErrorKind};
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::task::JoinHandle;
+//! 总装师：组装 process（进程）+ transport（管道对话），暴露类型化方法 API。
+//!
+//! 本文件保持薄：方法体是"序列化 → transport.request → rpc.parse"三行委托。
+//! 协议形状在 `dshr-protocol`，I/O 与配对在 `transport`，进程生死在 `process`。
+use dshr_protocol::requests::{
+    InitializeParams, InitializeResult, SessionPromptParams, SessionPromptResult, ShutdownResult,
+};
+use dshr_protocol::rpc::Notification;
+use tokio::sync::mpsc;
+
+use crate::process::RuntimeProcess;
+use crate::transport::Transport;
+
+pub use crate::error::Error;
+pub use crate::process::HarnessSpawnConfig;
 
 #[derive(Debug)]
 pub struct HarnessClient {
-    child: Child,
-    stdin: ChildStdin,
-    _stderr_task: JoinHandle<()>,
-    lines: Lines<BufReader<ChildStdout>>,
-}
-
-#[derive(Debug)]
-pub struct HarnessSpawnConfig {
-    pub command: String,
-    pub args: Vec<String>,
-    pub current_dir: String,
-    pub env: Vec<(String, String)>,
+    process: RuntimeProcess,
+    transport: Transport,
 }
 
 impl HarnessClient {
-    pub async fn spawn(config: HarnessSpawnConfig) -> Result<Self, std::io::Error> {
-        let mut child = Command::new(&config.command)
-            .args(&config.args)
-            .current_dir(&config.current_dir)
-            .envs(config.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        // take() 拿走管道所有权，child 留着做 kill/wait;
-        let stdin = child.stdin.take().expect("stdin 已 piped");
-        let stderr = child.stderr.take().expect("stderr 已 piped");
-        let stdout = child.stdout.take().expect("stdout 已 piped");
-
-        // 后台 task 持续读 stderr，读到 EOF（子进程退出）才结束。
-        // stderr 的所有权移进 task，字段里只留任务的句柄。
-        let _stderr_task = tokio::spawn(async move {
-            let mut err_lines = BufReader::new(stderr).lines();
-            while let Ok(Some(err_line)) = err_lines.next_line().await {
-                eprintln!("[runtime stderr] {err_line}");
-            }
-        });
-
-        // stdout 的所有权被 BufReader 消费掉，所以结构体里没有单独的 stdout 字段
-        let lines = BufReader::new(stdout).lines();
-
-        Ok(Self {
-            child,
-            stdin,
-            _stderr_task,
-            lines,
-        })
+    /// 组装：拉起进程 → 启动管道对话。
+    pub async fn spawn(config: HarnessSpawnConfig) -> Result<Self, Error> {
+        let (process, stdin, stdout) = RuntimeProcess::spawn(config).await?;
+        let transport = Transport::start(stdin, stdout);
+        Ok(Self { process, transport })
     }
 
-    pub async fn initialize(&mut self, request: &str) -> Result<String, Error> {
-        self.stdin.write_all(request.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        let line = self
-            .lines
-            .next_line()
-            .await?
-            .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, "runtime 提前退出"))?;
-        Ok(line)
+    /// initialize：进程级握手，返回 serverInfo。
+    pub async fn initialize(
+        &mut self,
+        params: &InitializeParams,
+    ) -> Result<InitializeResult, Error> {
+        let body = serde_json::to_string(params)?;
+        let resp = self.transport.request("initialize", &body).await?;
+        Ok(dshr_protocol::rpc::parse(&resp)?)
     }
 
-    pub async fn prompt(&mut self, request: &str, id: u64) -> Result<String, Error> {
-        self.stdin.write_all(request.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        loop {
-            let line = self
-                .lines
-                .next_line()
-                .await?
-                .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, "runtime 提前退出"))?;
-            let value: serde_json::Value =
-                serde_json::from_str(&line).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-            if value.get("id").and_then(|v| v.as_u64()) == Some(id) {
-                return Ok(line);
-            }
-            println!("[notify] {line}");
-        }
+    /// session/prompt：发一条消息，返回 messageId 入队回执。
+    pub async fn prompt(
+        &mut self,
+        params: &SessionPromptParams,
+    ) -> Result<SessionPromptResult, Error> {
+        let body = serde_json::to_string(params)?;
+        let resp = self.transport.request("session/prompt", &body).await?;
+        Ok(dshr_protocol::rpc::parse(&resp)?)
     }
 
-    pub async fn shutdown(mut self) -> Result<(), Error> {
-        let shutdown = r#"{"jsonrpc":"2.0","id":2,"method":"shutdown","params":{}}"#;
-        self.stdin.write_all(shutdown.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.child.kill().await?;
-        self.child.wait().await?;
+    /// shutdown：发 shutdown → 等响应 → 杀进程 → 收尸。
+    pub async fn shutdown(self) -> Result<(), Error> {
+        let Self {
+            process,
+            mut transport,
+        } = self;
+        let resp = transport.request("shutdown", "{}").await?;
+        dshr_protocol::rpc::parse::<ShutdownResult>(&resp)?;
+        process.kill_and_wait().await?;
         Ok(())
+    }
+
+    /// 事件流接收端（结构化通知帧）。state 从这里消费。
+    pub fn events(&mut self) -> &mut mpsc::UnboundedReceiver<Notification> {
+        self.transport.events()
     }
 }
