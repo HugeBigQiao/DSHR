@@ -66,7 +66,7 @@ pub struct ToolResultBlock {
     pub is_error: Option<bool>,
 }
 
-/// 图片的持久化元数据（官方 attachment/attachment/src/types.ts 的 ImageAttachmentRef）。
+/// 图片的持久化元数据（官方 packages/attachment/attachment/src/types.ts 的 ImageAttachmentRef）。
 /// 用在 ImageBlock.attachment。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

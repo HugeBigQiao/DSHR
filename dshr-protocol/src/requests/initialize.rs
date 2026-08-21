@@ -1,5 +1,5 @@
 //! `initialize` 请求：进程级握手。
-//! 官方：types.ts 的 InitializeParams / InitializeResult
+//! 官方：packages/sdk/protocol/src/types.ts 的 InitializeParams / InitializeResult
 //! 用在 runtime 启动后的第一步（serverInfo 校验、provider/model 配置）。
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +22,7 @@ pub struct InitializeResult {
 }
 
 /// runtime 的服务标识。
-/// 官方：types.ts 的 InitializeResult.serverInfo
+/// 官方：packages/sdk/protocol/src/types.ts 的 InitializeResult.serverInfo
 /// 用在 InitializeResult.server_info（wire 名 "deepseek-harness-sdk-runtime"）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerInfo {

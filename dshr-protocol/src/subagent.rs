@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 子代理运行结束的原因。
-/// 官方：subagent/subagent/src/types.ts 的 SubagentStopReason
+/// 官方：packages/subagent/subagent/src/types.ts 的 SubagentStopReason
 /// 用在 subagent.finished 通知的 stopReason 字段。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

@@ -105,18 +105,31 @@ dshr/
 │       ├── content_block/
 │       │   ├── contentblock.rs  # 5 种 Block 字段形状 ← ContentBlockMap
 │       │   └── fallback.rs      # 未知块类型兜底（手写 Deserialize）
-│       ├── session_event.rs  # SessionEvent 信封 + 判别枚举 ← core/session/types.ts
-│       ├── session_event/    # 事件 data 按事件族拆
+│       ├── session_event.rs  # SessionEvent 信封 + 判别枚举（48 种）+ turn_step() ← core/session/types.ts
+│       ├── session_event/    # 事件 data 按事件族拆（核心 13 + 扩展 35，全结构化）
 │       │   ├── turn.rs       #   turn/start·end、step/start·end + TurnEndReason
-│       │   ├── message.rs    #   user/message、assistant/chunk·message + Message
-│       │   ├── tool.rs       #   tool/call、tool/result
+│       │   ├── message.rs    #   user/message、assistant/chunk·message（含 interrupted）+ Message
+│       │   ├── tool.rs       #   tool/call、tool/result、tool/code-dispatch(-start)
 │       │   ├── request.rs    #   request/header、request/context
 │       │   ├── session.rs    #   session/end-seed
-│       │   ├── misc.rs       #   todo/write + TodoItem
-│       │   ├── approval.rs   #   扩展事件占位（fallback 兜住）
-│       │   ├── compaction.rs #   扩展事件占位（fallback 兜住）
+│       │   ├── misc.rs       #   todo/write + feedback/record
+│       │   ├── agent.rs      #   agent-preset/selected、agent/inbox/spliced
+│       │   ├── approval.rs   #   approval/asked·decided·policy、permission/preset
+│       │   ├── command.rs    #   command/run、command/done
+│       │   ├── compaction.rs #   compaction/start·end·prune·summary
+│       │   ├── descriptor.rs #   subagent/descriptor
+│       │   ├── goal.rs       #   goal/change（快照+墓碑）
+│       │   ├── hook.rs       #   hook/invoked、hook/result
+│       │   ├── mode.rs       #   plan/mode、sandbox/mode
+│       │   ├── retry.rs      #   llm/retry、llm/retry-started
+│       │   ├── schedule.rs   #   schedule/change
+│       │   ├── team.rs       #   team/member、team/message/queued·delivered、team/task
+│       │   ├── title.rs      #   session/title、session/title-llm-request
+│       │   ├── web.rs        #   web/deepseek-search-llm-request
+│       │   ├── workflow.rs   #   tool-workflow/run-start·end、agent-start·end
 │       │   └── fallback.rs   #   未知事件兜底（信封 → 分发，lossless）
 │       ├── llm.rs            # TokenUsage/FinishReason/StreamChunk/LlmFailure ← llm/types.ts
+│       ├── notifications.rs  # 通知侧 wire 类型 + Kind 分发 ← 官方 types.ts 的 NotificationMap
 │       └── subagent.rs       # SubagentStopReason ← subagent/types.ts
 ├── dshr-runtime/             # ② 管理单个 runtime 进程
 │   ├── src/
@@ -126,13 +139,31 @@ dshr/
 │   │   ├── transport.rs      # 管道对话：读循环 + id 配对 + 事件通道（≈ transport.ts 的 I/O 半）
 │   │   └── process.rs        # 进程生死：spawn/stderr 任务/kill/wait（≈ dispose.ts 简化）
 │   └── Cargo.toml
-├── dshr-state/               # ③ 中间人：消费事件流 → 解析 → 写本地库（纯逻辑 + 集成测试）
-│   ├── src/lib.rs
+├── dshr-state/               # ③ 中间人：UI 与 runtime 之间的总调度（三层见 §9.5）
+│   ├── src/
+│   │   ├── lib.rs            # 声明 + Error（thiserror From 链吸收 runtime/rusqlite）
+│   │   ├── ui.rs             # ① UI 对接层入口（pub use 重导出 UiEvent/Command/AppState）
+│   │   ├── ui/               #   event.rs（UiEvent）/ command.rs（Command）/ app.rs（AppState）
+│   │   ├── core.rs           # ② 处理层入口
+│   │   ├── core/             #   config.rs / store.rs / session.rs / transcode.rs
+│   │   ├── bridge.rs         # ③ runtime 对接层入口
+│   │   └── bridge/           #   bridge.rs（RtInfo/Bridge，state 内唯一 import dshr-runtime）
 │   └── tests/full_round.rs   # 真实全链路测试（.env 配置驱动）
-├── dshr-data/                # ④ 本地数据层（rusqlite 加工库）：账务/索引/配置/审计
-│   └── src/lib.rs            # open() + 规划表（见 §6）
-├── dshr-ui/                  # ⑤ Iced UI（bin target，未开工）
-│   └── src/main.rs
+├── dshr-data/                # ④ 本地数据层（rusqlite 加工库）：加工索引（TABLES.csv 落地）
+│   ├── src/lib.rs            # open()/open_in_memory() + 分层声明
+│   ├── src/schema.rs         # 建表：7 张表 + 索引（幂等 IF NOT EXISTS，见 §6 / TABLES.csv）
+│   ├── src/write.rs          # 写入：append-only（runtimes/sessions 例外允许 update）
+│   ├── src/read.rs           # 读取：监管/历史查询入口（行查询，聚合留给 state/ui）
+│   └── tests/roundtrip.rs    # 内存库往返测试（建表+写读一致）
+├── data/                     # 本地数据库落盘目录（gitignore）：dshr.db 等
+│   └── dshr.db               # 加工索引库（dshr-data::open 的默认路径）
+├── dshr-ui/                  # ⑤ Iced UI（bin target）
+│   └── src/
+│       ├── main.rs           # 入口：iced::application 装配
+│       ├── app.rs            # App 状态机：update/apply_event/订阅（view 薄委托）
+│       ├── view.rs           # 渲染层：view/sidebar/chat_area（纯渲染）
+│       ├── message.rs        # Message 枚举（用户操作 → update）
+│       └── model.rs          # 视图模型（RtView/SessionView/MsgView）
 ├── runtime-manifest.json     # runtime 版本 pin + 获取方式（阶段 B 用）
 └── scripts/fetch-runtime.ps1 # 阶段 B：下载官方 wheel 或本地构建 exe
 ```
@@ -140,11 +171,12 @@ dshr/
 ## 4. 协议 port 关键决策
 
 1. **判别联合用 `#[serde(tag = "type")]`**：事件 wire 类型带斜杠（`turn/start`），不能用 kebab-case，**每个变体显式 `#[serde(rename = "...")]`**；data 结构体驼峰处 `camelCase`；嵌套联合（`TurnEndReason`）用 `tag = "kind"`。
-2. **merge-extensible 必须宽容**：官方 48 种事件会继续涨（rc.8 的 `team/*` 甚至不在核心包）。**手写 `Deserialize`**：信封 → 按 type 分发，未知进 `Unknown`（lossless 保留）。`ignorable` 语义：未知 + ignorable 可跳过；无标记官方要求拒绝（dshr 先宽松）。
+2. **merge-extensible 必须宽容**：官方已知事件 48 种已全结构化（核心 13 + 插件注册 35），但插件/新版还会继续涨。**手写 `Deserialize`**：信封 → 按 type 分发，未知进 `Unknown`（lossless 保留）。`ignorable` 语义：未知 + ignorable 可跳过；无标记官方要求拒绝（dshr 先宽松）。
 3. **transport 划分**：帧逻辑（构造/判断/解析/信封）全在 `protocol/rpc.rs`（零依赖纯函数）；管道 I/O + 配对在 runtime 的 `transport.rs`。
 4. **错误分层**：`protocol::rpc::ParseError`（帧层，零依赖手写 Display）+ `runtime::Error`（thiserror，`From` 链吸收 ParseError/io/Json）——不建单独 error crate，跨 crate"共享"靠转换链。
 5. **事件通道结构化**：通知以 `Notification { method, params: Value }` 出通道，state 按 method 解析（不做字符串拼接）。
 6. **保留项（未实施）**：`RpcRequest` trait（方法名+参数+结果类型绑定）——当前 3 个方法重复度低，将来加方法时再上。
+7. **标记项：`EpochHeader.config` 未来大概率要结构化**：目前用 opaque `Value`（数据不丢），监管面板做"请求配置视图"（看每轮配置/system/工具列表）时补 `LlmCallConfig` 形状；`ToolSchema` 同理。
 
 ## 5. 完整流程（fn 级调用链）
 
@@ -199,59 +231,19 @@ full_round 测试（dshr-state/tests）
 
 ### 表结构（rusqlite）
 
-```sql
--- 会话 + 血缘（subagent 父子）
-CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,              -- sessionId
-    cwd TEXT NOT NULL,
-    parent_session_id TEXT,           -- 从 subagent.started 填
-    created_at INTEGER NOT NULL,      -- epoch ms
-    last_seq INTEGER NOT NULL DEFAULT 0,
-    status TEXT                       -- idle / running（session.status）
-);
+**表结构以 `dshr/TABLES.csv` 为单源**；`schema.rs` 的 `init_schema()` 是它的落地实现（幂等 IF NOT EXISTS）。
 
--- 事件索引（回放/搜索，payload lossless——Unknown 事件也能存）
-CREATE TABLE events (
-    session_id TEXT NOT NULL,
-    seq INTEGER NOT NULL,
-    type TEXT NOT NULL,               -- turn/start, tool/call…
-    time INTEGER NOT NULL,
-    payload TEXT NOT NULL,            -- 原始 data JSON
-    PRIMARY KEY (session_id, seq)
-);
+| 表 | 作用 | 关键列 | 写策略 |
+|---|---|---|---|
+| `runtimes` | 进程宿主（一个 dshr 对话 = 一个 runtime） | id/name/state(active·closed·archived)/created_at/command/args/current_dir/env | 插入；**允许 update**：改名、归档（删=改 state，不物理删） |
+| `sessions` | 会话（挂 runtime 下，parent_session_id 建血缘树） | id/runtime_id/cwd/parent_session_id/created_at/status/last_seq | 插入；update：status、last_seq（增量同步书签） |
+| `requests` | 进程级+轮级请求（initialize/session_prompt/shutdown） | runtime_id/session_id/turn_id/time/method/duration_ms/success/error_message | append-only |
+| `turns` | 轮（turn/start 开行 → turn/end 回填），token 展开成列 | turn_id（state 生成：runtime_id-session_id-轮号）/reason/usage_input/output/cache_read/cache_write/reasoning/user_text/assistant_text | 开行插入，结束回填 |
+| `events` | 事件 lossless 底线：payload 原始 JSON | (session_id,seq) PK/type/time/turn/step/payload | append-only |
+| `tool_calls` | 监管命令视图直查表 | call_id/name/arguments/result_text/is_error/duration_ms/meta（工具私有载荷如 fs diff） | append-only |
+| `runtime_logs` | runtime 进程日志（stderr 等，GUI 无终端时的崩溃排查依据） | runtime_id/time/level/message | append-only |
 
--- token 账务（监管核心）
-CREATE TABLE usage (
-    session_id TEXT NOT NULL,
-    seq INTEGER NOT NULL,             -- assistant/message 的 seq
-    input_tokens INTEGER NOT NULL,
-    output_tokens INTEGER NOT NULL,
-    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-    model TEXT,                       -- 从 request/context 补
-    PRIMARY KEY (session_id, seq)
-);
-
--- 离线算账（token × 定价表）
-CREATE TABLE accounting (
-    session_id TEXT NOT NULL,
-    date TEXT NOT NULL,               -- YYYY-MM-DD
-    input_tokens INTEGER, output_tokens INTEGER,
-    cache_tokens INTEGER, reasoning_tokens INTEGER,
-    cost REAL,
-    PRIMARY KEY (session_id, date)
-);
-
--- 配置 + 操作日志（官方没有的数据）
-CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    time INTEGER NOT NULL,
-    event TEXT NOT NULL,              -- runtime_started / request_sent / shutdown…
-    detail TEXT
-);
-```
+**JSON 只留 3 处本质无法展开处**：`events.payload`、`tool_calls.arguments`、`runtimes.args/env`（参数/环境变量是结构不定列表）。`tool_calls.meta` 也是 JSON 字符串（diff 等工具私有展示载荷）。其余全部展开成列，20 列以内都不怕。
 
 ### 写入路径（state 做中间人）
 
@@ -259,11 +251,13 @@ CREATE TABLE audit_log (
 events 通道（Notification{method, params}）
   → state 按 method 分发：
       session.event → 解析 SessionEvent（fallback 兜未知）
-          ├─ turn/start·end → sessions.status / 回合计数
-          ├─ assistant/message → 消息记录 + usage 表
-          ├─ request/context → model 补全
-          ├─ tool/call·result → 命令记录（监管面板）
-          └─ 其他 → events 表（lossless payload）
+          ├─ turn/start       → turns 开行（turn_id = runtime_id-session_id-轮号）
+          ├─ turn/end         → turns 回填（耗时/reason/token 合计）
+          ├─ assistant/message→ turns.assistant_text + token 列（usage）
+          ├─ user/message     → turns.user_text
+          ├─ tool/call·result → tool_calls（监管面板）
+          └─ 其他/未知        → events 表（lossless payload）
+      session.status → sessions.status
       subagent.started → sessions.parent_session_id（血缘）
   → rusqlite 批量写（事务）
 ```
@@ -272,12 +266,13 @@ events 通道（Notification{method, params}）
 
 | 视图 | 查询 |
 |---|---|
-| token 明细 | `usage` 表按 session/日期聚合 |
-| 离线算账 | `accounting`（token × 定价，后台算） |
-| 历史浏览/搜索 | `events` 表按 type/time 过滤 |
+| token 明细 | `turns` 按 session 聚合（`read::usage_summary`） |
+| 离线算账 | `usage_summary` × 定价表（state 层做） |
+| 历史浏览/搜索 | `events` 按 type/time 过滤 |
 | 会话树 | `sessions.parent_session_id` |
+| 命令执行视图 | `tool_calls` 按 session/turn 过滤 |
 
-**关键设计**：`events` 表存原始 payload（lossless），查询时按需解析；`usage` 是提取出的账务列——两者配合，兼顾"不丢数据"与"查询效率"。
+**关键设计**：`events` 表存原始 payload（lossless，未知事件也能兜住）；`turns` 是提取出的账务列——两者配合，兼顾"不丢数据"与"查询效率"。
 
 ## 7. 监管面板三视图（数据主权核心）
 
@@ -313,17 +308,53 @@ events 通道（Notification{method, params}）
 
 **crate 划分**：5 crate 平铺，依赖方向 `dshr-ui → dshr-state → dshr-runtime → dshr-protocol`，`dshr-data` 被 state 消费（`dshr-state → dshr-data`）。protocol 仅 serde/serde_json。
 
+## 9.5 state 三层与 UI 简单版设计（M2 前哨，用户拍板）
+
+### state 分层（A：core 做数据转接，UI 保持薄）
+
+```
+dshr-state/src/
+├── lib.rs         # 声明 + Error（对外只露 ui::AppState）
+├── ui.rs          # ① UI 对接层入口（pub use 重导出）
+├── ui/            #   event.rs（UiEvent）/ command.rs（Command）/ app.rs（AppState）
+├── core.rs        # ② 处理层入口
+├── core/          #   config / store / session / transcode
+├── bridge.rs      # ③ runtime 对接层入口
+└── bridge/        #   bridge.rs（RtInfo/Bridge）
+```
+
+**转接原则（core/transcode）**：一切形状转换集中在此——
+- UI→runtime：`Command` → bridge 调用参数
+- runtime→UI：`SessionEvent`/通知 → `UiEvent`（Msg/ToolUse/Status…）
+- UI 只渲染 UiEvent（薄）；runtime 只出协议类型（纯净）；core 是唯一"翻译官"。
+
+### UI 简单版（Iced 0.14，backend-thread 模式）
+
+- **进程模型**：`dshr.exe` 主进程 + 每 runtime 一个 node 子进程；Iced 同步 update + tokio 后台线程 + 双 mpsc（命令/事件通道）。
+- **布局**：左 runtime/会话树 + 右聊天区（消息流 + 输入框）。
+- **消息流**：user/assistant 消息 + 工具摘要行（🔧 bash 150ms / 📝 edit a.md / ⛔ error）。
+- **侧边栏**：runtime 添加/删除（= spawn/archive）；runtime 内多会话；cwd 只读锁死（换工作区 = 删 runtime 重建，数据保留可查）。
+- **流式 chunk 渲染**：v2（简单版等 `assistant/message` 组装完再渲染）。
+- **会话内详情数据源（已全部就位）**：`tool/call`+`tool/result` → tool_calls 表；`tool/result.meta.diffs` → tool_calls.meta 列（内容级 diff v2）；`assistant/message.usage` → turns 表；`session/title` 已结构化。
+
+### 数据路径（B）
+
+`DSH_DATA_DIR`（.env）→ 缺省 `dshr/data/dshr.db`；未来 env 合并进 setting（toml），相对路径便于打包。
+
 ## 10. 里程碑与状态
 
 ### 阶段 A — 开发态（node carrier）
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| **M0** `dshr-protocol` | 全部类型 port + fallback + 帧层 | **主体完成**：content_block（5+fallback）、session_event（13 核心+fallback）、subagent、llm、requests、rpc 均 ✅；缺 `notifications.rs`（4 通知类型，3d 建） |
+| **M0** `dshr-protocol` | 全部类型 port + fallback + 帧层 | **完成**：content_block（5+fallback）、session_event（**48 种全结构化**：核心 13 + 扩展 35，含 fallback）、subagent、llm、requests、rpc、notifications（4 通知+Kind 分发）均 ✅ |
 | **M1** `dshr-runtime` | HarnessClient + spawn + dispose + smoke | **主体完成**：process/transport/client 正式版 ✅，全链路真实跑通（turn/end completed 断言）；剩余：dispose 阶梯、state 消费 |
 | **3d** | 协议接入 client | **大部分完成**：请求/响应类型化 ✅、事件通道结构化 ✅；剩余：state 解析通知（SessionEvent 等） |
-| **M2** `dshr-ui` 骨架 | Iced app + 聊天视图 + 流式渲染 | 未开始（先 R1/R2 原型） |
-| **M3** | 工作区/会话树 + 监管面板 | 未开始（依赖 dshr-data） |
+| **3e** `dshr-data` | 建表 + 写读层 + 测试 | **完成**：schema（7 表，含 runtime_logs）/write/read + 内存库往返测试 ✅ |
+| **3f** state 三层 | ui/core/bridge 骨架 + 类型定义 | **完成**：ui（UiEvent/Command/AppState）+ core（config/store/session/transcode）+ bridge（RtInfo/Bridge）✅ |
+| **3g** 消费循环 | events/stderr → 落库 + 转 UiEvent（请求计量 turn_id 回填） | **完成**：RuntimeTask select 三路 + lossless 落库 + 结构化列 ✅ |
+| **M2** `dshr-ui` 简单版 | Iced 窗口 + 消息流 + 侧边栏 + 输入框，全流程跑通 | **完成**：分层（main/app/view/message/model）+ 轮询 tick 接 AppState；**用户实测对话跑通** ✅（修过：Status 时序 bug、RtView 创建） |
+| **M3** | 工作区/会话树 + 监管面板 | 未开始（下一步） |
 
 ### 阶段 B — 发布态（单文件 exe）
 
@@ -336,7 +367,7 @@ events 通道（Notification{method, params}）
 
 - **R1 长列表虚拟化**：Iced `Scrollable` 不自动虚拟化，5000 条消息需 `widget::lazy`。→ 原型必测。
 - **R2 流式文本吞吐**：每 token 一次 update 的渲染吞吐实测（20 token/s 基准）。→ 原型必测。
-- **R3 Iced 版本 API 漂移**：0.14 较新，第三方生态跟进滞后；核心控件只用内置。
+- **R3 Iced 版本 API 漂移**：0.14 较新，第三方生态跟进滞后；核心控件只用内置。**已验证**：0.14 的 `application(boot,update,view)`/`Task`（替代 Command）/`Subscription::run_with`/`stream::channel` 编译链路 OK（dshr-ui 最小窗口 ✅）。
 - **R4 unknown event 宽容**：fallback 已实现，rc.8 的 `team/*` 等扩展事件靠它兜住。
 - **R5 审批流缺失**：`ask_user_question` dead，MVP 配 `approval: never`。
 - **R6 runtime 分发与版本**：npm 包 `@deepseek-ai/dsh-sdk-jsonrpc-demo` 目前 `0.1.0-rc.8`（pre-release 无兼容承诺，升级前备份 `$DSH_HOME`）；Windows 无官方 carrier → 依赖 Node ≥22.19 或自建 exe；npm 包需锁版本。
@@ -355,6 +386,11 @@ events 通道（Notification{method, params}）
 9. **错误分层**：`protocol::rpc::ParseError` + `runtime::Error`（thiserror From 链），不建单独 error crate。
 10. **事件通道结构化**：`Notification{method, params}` 出通道，state 按 method 解析。
 11. **存储后端选择**：runtime 用 jsonl（默认，格式已查证）；dshr 查询能力靠自己的 rusqlite 加工库，不 port 官方 sqlite schema。
+12. **dshr 自身配置用 TOML**（用户数据目录，如 `~/.config/dshr/config.toml`）：配置需要注释、可手改，toml crate 纯 Rust 打包无忧；`toml` 和 `json` 一样是运行时读取，不进二进制，打包后照常工作。
+13. **state 分层 = ui/core/bridge**：core/transcode 负责一切形状转换（UI→runtime、runtime→UI），UI 保持薄，runtime 保持纯净（§9.5）。
+14. **数据路径 = `DSH_DATA_DIR`**（.env）→ 缺省 `dshr/data/dshr.db`；未来 env 并入 setting（toml），相对路径便于打包（§9.5）。
+15. **工作区锁死**：spawn 时 `current_dir` + `InitializeParams.cwd` 钉死；cordis.yml 配 workspace-write 沙箱；UI 上 cwd 只读，换工作区 = 删 runtime 重建（archive 保留数据）。
+16. **stderr 落库**：process.rs 把 stderr 行转进 mpsc 通道 → state 写 `runtime_logs` 表（GUI 无终端时的崩溃排查依据）。
 
 ## 13. 关键事实与坑（已查证）
 
@@ -375,10 +411,15 @@ events 通道（Notification{method, params}）
 
 ## 15. 下一步计划（按序）
 
-1. **`notifications.rs`**（protocol）：4 个通知类型（`SessionEventNotification` 等）——state 解析的前置
-2. **dshr-data 建表**：`open()` + `init_schema()`（§6 的表）+ 基本写入函数
-3. **state 消费循环**：events 通道 → 按 method 解析 → 写 dshr-data（3d 收尾）
-4. **M1 收尾**：dispose 阶梯（EOF→SIGTERM→SIGKILL）
-5. **resolve_runtime / fetch**：npm 包安装 + node 检测 + exe 优先（决策 6 落地）
-6. **M2 前置**：Iced vs GPUI 原型对比（R1/R2）
-7. **优化候选**：`RpcRequest` trait（消 client 方法重复，方法多了再上）
+1. ~~`notifications.rs`~~（protocol）：4 个通知类型 + Kind 分发 ✅ 已完成
+2. ~~**dshr-data 建表**~~：`open()` + `init_schema()` + 写入/读取层 + 往返测试 ✅ 已完成（TABLES.csv 为单源，见 §6）
+3. ~~**协议全量结构化**~~：48 种事件全结构化（核心 13 + 扩展 35）+ `turn_step()` + `interrupted` ✅（tests/event_parse.rs 全绿）
+4. ~~**stderr 落库**~~：runtime stderr 通道 + `runtime_logs` 表 ✅（决策 16）
+5. ~~**3f state 三层骨架**~~：ui/core/bridge 类型定义 ✅（§9.5）
+6. ~~**core 转接 + 消费循环**~~：SessionEvent → UiEvent + 请求计量（turn_id 回填）+ 落库 ✅
+7. ~~**Iced 最小窗口**~~：验证 0.14 编译链路（R3）✅
+8. ~~**UI 简单版**~~：侧边栏 + 消息流 + 输入框，全流程跑通 ✅（用户实测）
+9. **M1 收尾**：dispose 阶梯（EOF→SIGTERM→SIGKILL）
+10. **resolve_runtime / fetch**：npm 包安装 + node 检测 + exe 优先（决策 6 落地）
+11. **M3 监管面板**：工作区/会话树完善 + 数据面板（依赖 dshr-data 查询）
+12. **优化候选**：`RpcRequest` trait（消 client 方法重复，方法多了再上）

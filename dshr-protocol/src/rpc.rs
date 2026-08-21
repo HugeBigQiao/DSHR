@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 /// 响应信封：`id` + 可选 `result`/`error`（二者有其一）。
-/// 官方：transport.ts 的 JsonRpcResponse
+/// 官方：packages/sdk/protocol/src/transport.ts 的 JsonRpcResponse
 /// 用在读循环按 id 配对后解析（`jsonrpc` 字段反序列化时自动忽略）。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RpcResponse<T> {
@@ -17,7 +17,7 @@ pub struct RpcResponse<T> {
 }
 
 /// JSON-RPC 错误对象。
-/// 官方：transport.ts 的 JsonRpcResponseError
+/// 官方：packages/sdk/protocol/src/transport.ts 的 JsonRpcResponseError
 /// 用在 RpcResponse.error（有 error 时 result 为空）。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RpcError {
@@ -49,7 +49,7 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// 通知帧：method + params（JSON，未解析的具体形状）。
-/// 官方：transport.ts 的通知信封；params 再由 state 按 method 解析成对应通知类型。
+/// 官方：packages/sdk/protocol/src/transport.ts 的通知信封；params 再由 state 按 method 解析成对应通知类型。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Notification {
     pub method: String,

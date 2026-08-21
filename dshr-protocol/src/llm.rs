@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::content_block::ContentBlock;
 
 /// 一次模型调用的 token 明细。
-/// 官方：llm/llm/src/types.ts 的 TokenUsage
+/// 官方：packages/llm/llm/src/types.ts 的 TokenUsage
 /// 用在 assistant/message 的 data.usage 与 StreamChunk 的 usage 变体（监管面板核心）。
 /// 注意：计数不相交——inputTokens 不含缓存，计费 = input + cacheRead + cacheWrite。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,7 +24,7 @@ pub struct TokenUsage {
 }
 
 /// 模型为什么停止输出。
-/// 官方：llm/llm/src/types.ts 的 FinishReasonMap
+/// 官方：packages/llm/llm/src/types.ts 的 FinishReasonMap
 /// 用在 StreamChunk 的 finish 变体（wire 上是 {kind:...} 对象）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -37,7 +37,7 @@ pub enum FinishReason {
 }
 
 /// 流式输出的一块（token 级回放保真）。
-/// 官方：llm/llm/src/types.ts 的 StreamChunk
+/// 官方：packages/llm/llm/src/types.ts 的 StreamChunk
 /// 用在 assistant/chunk 事件的 data.chunk。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -81,7 +81,7 @@ pub enum StreamChunk {
 }
 
 /// 结构化失败（provider/transport 错误事实）。
-/// 官方：llm/llm/src/types.ts 的 LlmFailure
+/// 官方：packages/llm/llm/src/types.ts 的 LlmFailure
 /// 用在 turn/end 的 data.error 与 FinishReason 的 failure。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

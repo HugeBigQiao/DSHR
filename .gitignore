@@ -16,6 +16,9 @@ runtime/
 # 冒烟/测试用工作目录
 .tmp-ws/
 
+# 本地数据库与数据文件（dshr-data 落盘目录）
+/data/
+
 # === 编辑器 / IDE ===
 .vscode/
 .idea/

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::llm::LlmFailure;
 
 /// `turn/start` 的 data：打开 turn `turn`。
-/// 官方：core/session/src/types.ts 的 SessionEventMap['turn/start']
+/// 官方：packages/core/session/src/types.ts 的 SessionEventMap['turn/start']
 /// 用在会话回合开始的事件。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnStartData {
@@ -15,7 +15,7 @@ pub struct TurnStartData {
 }
 
 /// `turn/end` 的 data：关闭 turn `turn`，附结束原因。
-/// 官方：core/session/src/types.ts 的 SessionEventMap['turn/end']
+/// 官方：packages/core/session/src/types.ts 的 SessionEventMap['turn/end']
 /// 用在会话回合结束的事件。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnEndData {
@@ -24,7 +24,7 @@ pub struct TurnEndData {
 }
 
 /// `step/start` 的 data：打开 step（一次模型调用 + 其工具执行）。
-/// 官方：core/session/src/types.ts 的 SessionEventMap['step/start']
+/// 官方：packages/core/session/src/types.ts 的 SessionEventMap['step/start']
 /// 用在步骤开始的事件。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepStartData {
@@ -33,7 +33,7 @@ pub struct StepStartData {
 }
 
 /// `step/end` 的 data：关闭 step。
-/// 官方：core/session/src/types.ts 的 SessionEventMap['step/end']
+/// 官方：packages/core/session/src/types.ts 的 SessionEventMap['step/end']
 /// 用在步骤结束的事件。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepEndData {
@@ -42,7 +42,7 @@ pub struct StepEndData {
 }
 
 /// 一轮 turn 为什么结束。
-/// 官方：core/session/src/types.ts 的 TurnEndReasonMap
+/// 官方：packages/core/session/src/types.ts 的 TurnEndReasonMap
 /// 用在 TurnEndData.reason（wire 上是 {kind:...} 对象，merge-extensible）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -57,7 +57,7 @@ pub enum TurnEndReason {
 }
 
 /// `aborted` 的取消原因。
-/// 官方：core/session/src/types.ts 的 TurnEndCancelCause
+/// 官方：packages/core/session/src/types.ts 的 TurnEndCancelCause
 /// 用在 TurnEndReason::Aborted 的 reason（wire 上是 {kind:...} 对象）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]

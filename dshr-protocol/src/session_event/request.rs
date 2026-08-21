@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// `request/header` 的 data：下次请求的完整请求头快照。
-/// 官方：core/session/src/types.ts 的 SessionEventMap['request/header']
+/// 官方：packages/core/session/src/types.ts 的 SessionEventMap['request/header']
 /// 用在模型请求头事件（监管面板配置/计费的数据源）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestHeaderData {
@@ -13,7 +13,7 @@ pub struct RequestHeaderData {
 }
 
 /// 为什么追加一个 request/header 快照。
-/// 官方：core/session/src/types.ts 的 RequestHeaderReason
+/// 官方：packages/core/session/src/types.ts 的 RequestHeaderReason
 /// 用在 RequestHeaderData.reason（wire 上是纯字符串）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -24,7 +24,7 @@ pub enum RequestHeaderReason {
 }
 
 /// 一次请求的调用配置快照。
-/// 官方：core/session/src/types.ts 的 EpochHeader
+/// 官方：packages/core/session/src/types.ts 的 EpochHeader
 /// 用在 RequestHeaderData.header。
 /// 简化：config 官方是 LlmCallConfig（复杂），先用 opaque Value；
 /// system/tools 同理，用到再补全形状（未知字段反序列化自动忽略）。
@@ -41,7 +41,7 @@ pub struct EpochHeader {
 }
 
 /// `request/context` 的 data：模型路由元数据。
-/// 官方：core/session/src/types.ts 的 RequestContext
+/// 官方：packages/core/session/src/types.ts 的 RequestContext
 /// 用在路由或容量变化时的事件（provider/model/contextWindow）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

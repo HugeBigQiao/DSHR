@@ -27,12 +27,20 @@ pub struct Transport {
 
 impl Transport {
     /// 从管道启动对话（spawn 后台读循环）。
+    /// 接收：stdin/stdout 管道（来自 process::spawn）。
+    /// 处理：建 pending 表 + events 通道，起一个常驻读循环任务。
+    /// 生成：Transport（持有 stdin、读循环句柄、事件接收端）。
     pub fn start(stdin: ChildStdin, stdout: ChildStdout) -> Self {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<String, Error>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let pending_loop = pending.clone();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
 
+        // 读循环（后台常驻）：接收 stdout 管道，逐行交给 rpc::classify 帧判断——
+        // 响应（有 id）→ 从 pending 取出对应的 oneshot 发送方，把响应行送回去（配对）；
+        // 通知（无 id）→ 结构化（method + params）塞进 events 通道，供 state 消费；
+        // 无法分类 → 打日志。
+        // 循环结束（EOF = runtime 退出）→ 失败所有仍挂起的请求。
         let task = tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -65,8 +73,11 @@ impl Transport {
         }
     }
 
-    /// 发一个请求并等待配对响应：分配 id → 登记 pending → 构造信封 → 写 stdin → 等。
-    /// `params` 为已序列化的 JSON（无 params 的请求传 `"{}"`）。
+    /// 发一个请求并等待配对响应。
+    /// 接收：method（协议方法名）+ params（已序列化的 JSON，无 params 传 "{}"）。
+    /// 处理：分配自增 id → 把 oneshot 发送方登记进 pending（先登记后写，防响应先到丢包）
+    ///       → rpc::build_request 构造信封行 → 写入 stdin。
+    /// 生成：读循环配对后返回对应的响应行（或错误）。
     pub async fn request(&mut self, method: &str, params: &str) -> Result<String, Error> {
         let id = self.next_id;
         self.next_id += 1;
@@ -84,5 +95,10 @@ impl Transport {
     /// 事件流接收端（结构化通知帧）。state 从这里消费。
     pub fn events(&mut self) -> &mut mpsc::UnboundedReceiver<Notification> {
         &mut self.events
+    }
+
+    /// 事件流接收端（move 出所有权，供后台任务常驻 select）。
+    pub fn take_events(&mut self) -> mpsc::UnboundedReceiver<Notification> {
+        std::mem::replace(&mut self.events, mpsc::unbounded_channel().1)
     }
 }

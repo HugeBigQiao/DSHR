@@ -22,6 +22,12 @@ struct RawBlock {
 
 impl<'de> Deserialize<'de> for ContentBlock {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // 手写反序列化的核心分发：
+        // 接收：任意内容块 JSON。
+        // 处理：先解通用信封（type + 其余字段扁平收集），再按 type 分发——
+        //       已知 5 种 → 解成对应 Block 结构体（含递归）；
+        //       未知 → 字段原样保留进 Unknown（lossless）。
+        // 生成：类型化的 ContentBlock。
         let raw = RawBlock::deserialize(d)?;
         // rest 从 Map 转回 Value，按 type 分发到对应块类型（含递归）。
         let rest = serde_json::Value::Object(raw.rest);

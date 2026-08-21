@@ -1,5 +1,5 @@
 //! `session/prompt` 请求：一个用户回合。
-//! 官方：types.ts 的 SessionPromptParams / SessionPromptResult
+//! 官方：packages/sdk/protocol/src/types.ts 的 SessionPromptParams / SessionPromptResult
 //! 用在向会话发消息（未知 sessionId 懒创建 session，响应是 messageId 入队回执）。
 use serde::{Deserialize, Serialize};
 

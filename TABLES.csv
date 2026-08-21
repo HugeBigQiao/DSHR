@@ -1,0 +1,62 @@
+table,column,type,key,description
+runtimes,id,TEXT,PK,进程实例id
+runtimes,name,TEXT,,显示名（用户可改）
+runtimes,state,TEXT,,active（运行中）/closed（已退出）/archived（废弃历史）
+runtimes,created_at,INTEGER,,启动时间（epoch ms）
+runtimes,command,TEXT,,可执行文件
+runtimes,args,TEXT,,启动参数（配置，不查询）
+runtimes,current_dir,TEXT,,工作目录
+runtimes,env,TEXT,,环境变量（配置，不查询）
+sessions,id,TEXT,PK,sessionId
+sessions,runtime_id,TEXT,FK->runtimes.id,宿主进程
+sessions,cwd,TEXT,,工作目录
+sessions,parent_session_id,TEXT,FK->sessions.id,subagent血缘（会话树）
+sessions,created_at,INTEGER,,会话创建时间
+sessions,status,TEXT,,idle/running
+sessions,last_seq,INTEGER,,最新事件seq（增量同步书签）
+requests,id,INTEGER,PK AUTOINCREMENT,自增
+requests,runtime_id,TEXT,FK->runtimes.id,宿主进程
+requests,session_id,TEXT,FK->sessions.id,关联会话（initialize/shutdown为空）
+requests,turn_id,TEXT,FK->turns.turn_id,关联轮（进程级请求为空）
+requests,time,INTEGER,,发出时间
+requests,method,TEXT,,initialize/session_prompt/shutdown
+requests,duration_ms,INTEGER,,请求耗时
+requests,success,INTEGER,,是否成功（0/1）
+requests,error_message,TEXT,,失败时的错误信息
+turns,turn_id,TEXT,PK,state生成（runtime_id-session_id-turn号）
+turns,runtime_id,TEXT,FK->runtimes.id,宿主进程
+turns,session_id,TEXT,FK->sessions.id,会话
+turns,turn,INTEGER,,轮号
+turns,started_at,INTEGER,,turn/start时间
+turns,ended_at,INTEGER,,turn/end时间
+turns,duration_ms,INTEGER,,轮耗时
+turns,reason,TEXT,,completed/error/aborted等
+turns,usage_input,INTEGER,,本轮input tokens合计
+turns,usage_output,INTEGER,,本轮output tokens合计
+turns,usage_cache_read,INTEGER,,本轮cache read tokens合计
+turns,usage_cache_write,INTEGER,,本轮cache write tokens合计
+turns,usage_reasoning,INTEGER,,本轮reasoning tokens合计
+turns,user_text,TEXT,,本轮用户输入文本（从user/message提取）
+turns,assistant_text,TEXT,,本轮最终回复文本（从assistant/message提取）
+events,session_id,TEXT,PK复合,会话
+events,seq,INTEGER,PK复合,会话内单调递增
+events,type,TEXT,,事件类型
+events,time,INTEGER,,事件时间
+events,turn,INTEGER,,所属轮（可空）
+events,step,INTEGER,,所属步（可空）
+events,payload,TEXT,,原始data JSON（lossless底线）
+tool_calls,id,INTEGER,PK AUTOINCREMENT,自增
+tool_calls,runtime_id,TEXT,FK->runtimes.id,宿主进程
+tool_calls,session_id,TEXT,FK->sessions.id,会话
+tool_calls,turn_id,TEXT,FK->turns.turn_id,所属轮
+tool_calls,call_id,TEXT,,tool/call与tool/result配对id
+tool_calls,name,TEXT,,工具名
+tool_calls,arguments,TEXT,,工具参数（JSON字符串）
+tool_calls,result_text,TEXT,,工具输出文本
+tool_calls,is_error,INTEGER,,是否失败（0/1）
+tool_calls,duration_ms,INTEGER,,调用耗时（result-call时间差）
+runtime_logs,id,INTEGER,PK AUTOINCREMENT,自增主键
+runtime_logs,runtime_id,TEXT,FK->runtimes.id,所属运行时实
+runtime_logs,time,INTEGER,,本地收到时间（epoch ms）
+runtime_logs,level,TEXT,,日志级别（stderr等）
+runtime_logs,message,TEXT,,原始日志行

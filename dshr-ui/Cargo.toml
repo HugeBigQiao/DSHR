@@ -4,3 +4,6 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+dshr-protocol = { path = "../dshr-protocol" }
+dshr-state = { path = "../dshr-state" }
+iced = { workspace = true, features = ["tokio"] }
