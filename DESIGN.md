@@ -380,7 +380,7 @@ dshr-state/src/
 3. **UI 框架倾向 Iced 0.14（待原型验证）**：GPUI 弃选（API 不稳、crates.io 滞后）。
 4. **路线 = 渐进**：宿主应用 → 替换边界清晰的组件 → 未来才评估自研 minimal loop。
 5. **更新机制**：自己仓库自更新；runtime 走 npm/pip 锁版本，不 git pull 官方；升级前备份 `$DSH_HOME`。
-6. **runtime 获取（A/B 双轨）**：A = node carrier（长期开发态，Node ≥22.19，`node <npm 包>/lib/bin.js <cordis.yml>`）；B = 单文件 exe（发布态，免 Node，自建 Windows 分支）。**官方 npm 包 = `@deepseek-ai/dsh-sdk-jsonrpc-demo`（bin: `dsh-jsonrpc-agent`）**，`npm install --prefix` 锁版本装到 dshr 管理目录；不 `npx @deepseek-ai/dsh web`（全家桶不是 headless runtime）、不 git clone。启动时 `resolve_runtime()`：找 exe → 检测 node → npm 安装 → spawn。不 commit .exe；exe 属发布产物并附官方 NOTICE（MIT）。
+6. **runtime 获取（A1 主推 / A2 备用 / B 废除）**：A1 = 依赖系统 node（Node ≥22.19），官方 npm 包 `@deepseek-ai/dsh-sdk-jsonrpc-demo`（bin: `dsh-jsonrpc-agent`）`npm install --prefix` 锁版本装到 dshr 管理目录；启动时 `resolve_runtime()`：检测 node → 比对已装包版本 → 缺失/不符则 npm 安装/更新 → spawn `node <管理目录>/.../lib/bin.js <cordis.yml>`。**A2（备用，1.0 稳定版后评估）** = 内置 node 可移植包，真零依赖。**B（单文件 exe）废除**：官方 pkg 打包把整个 node_modules 闭包内嵌进 exe（构建时刻固化），用户无法后续加插件，违背插件自由原则（详见 §13）。不 `npx @deepseek-ai/dsh web`（全家桶不是 headless runtime）、不 git clone、不 commit .exe。
 7. **定位与插件边界**：工具/能力插件全在 runtime 进程内跑，往 cordis.yml 加即可，Rust 侧零改动；插件安装 = 改 yml + npm install + 重启。
 8. **runtime 分层 = 按职责不按方向**：`process`（进程生死）/ `transport`（管道对话）/ `client`（总装师）。send/receive 方向拆已验证会变空壳（请求-响应配对本质跨方向）。
 9. **错误分层**：`protocol::rpc::ParseError` + `runtime::Error`（thiserror From 链），不建单独 error crate。
@@ -398,7 +398,8 @@ dshr-state/src/
 - **web_fetch 默认禁用**（SSRF 未防护），`web_search` 可用（60s 超时）。
 - **会话日志格式**：`.jsonl.zstd` = 多独立 Zstandard frames（Node 只解第一帧，按 RFC 8878 切）。
 - **当前环境**：`DSH_HOME=C:\Users\qiaoy\.dsh`；web profile = `@deepseek-ai/dsh-base` + `dsh-web-app`。
-- **官方 bundled runtime exe 无 Windows carrier**：`platforms.json` 仅 linux-x64/arm64、macos-arm64。
+- **官方 bundled runtime exe 无 Windows carrier**：`platforms.json` 仅 linux-x64/arm64、macos-arm64；`scripts/build-exe-for-python-sdk.ts` 里 `PLATFORMS = ['linux', 'macos']`，注释明确 Windows 是 non-goal。
+- **官方 exe 插件固化（已查证 build-exe-for-python-sdk.ts）**：`@yao-pkg/pkg --sea` 打包，`ASSET_GLOBS` 把整个 node_modules 的 js/cjs/mjs/json/node/wasm 内嵌进 exe，Cordis 的 bare 插件 import 走内嵌虚拟 fs——**构建时刻的插件才可用，用户无法后续加插件**。这是 B 废除的根因（决策 6）。官方 Python carrier 是另一种内置：闭包复制进 wheel 的 `node/` 目录（`packaged-bin.ts`："Bare plugins resolve from the installed runtime closure"）。
 - **官方参考组合**：`examples/jsonrpc-agent`（bash/read/write/edit/subagent/todo_write + jsonl 持久化 + compaction + token-meter）。
 - **Windows 沙箱现状**：TS + koffi FFI（`dsh-sandbox-windows-acl`），ABI 漂移痛点 → 未来 Rust 化候选。
 - **Excel 工具**：calamine（读）+ rust_xlsxwriter（写），纯 Rust。
@@ -420,6 +421,6 @@ dshr-state/src/
 7. ~~**Iced 最小窗口**~~：验证 0.14 编译链路（R3）✅
 8. ~~**UI 简单版**~~：侧边栏 + 消息流 + 输入框，全流程跑通 ✅（用户实测）
 9. **M1 收尾**：dispose 阶梯（EOF→SIGTERM→SIGKILL）
-10. **resolve_runtime / fetch**：npm 包安装 + node 检测 + exe 优先（决策 6 落地）
+10. **resolve_runtime / fetch（A1 落地）**：node 检测（≥22.19，缺失引导安装）→ npm 包版本比对 → `npm install --prefix` 锁版本到管理目录 → spawn；UI 首次启动引导页显示进度（决策 6）
 11. **M3 监管面板**：工作区/会话树完善 + 数据面板（依赖 dshr-data 查询）
 12. **优化候选**：`RpcRequest` trait（消 client 方法重复，方法多了再上）
