@@ -1,6 +1,6 @@
-//! ③ runtime 对接层：把 dshr-runtime 的 HarnessClient 包一层。
+//! runtime 对接层：把 dshr-runtime 的 HarnessClient 包一层（任务页专用）。
 //!
-//! 对上层（core）只暴露这里定义的数据格式（RtInfo/SendOutcome），
+//! 对上层（Engine/RuntimeTask）只暴露这里定义的数据格式（RtInfo/SendOutcome），
 //! 上层不直接看到 dshr-runtime 的类型——换 runtime 实现时只改本文件。
 
 use dshr_runtime::client::{HarnessClient, HarnessSpawnConfig};
@@ -22,8 +22,8 @@ pub struct RtInfo {
     pub args: Vec<String>,
     /// 进程工作目录（= 官方仓库根，node 要在这跑）。
     pub process_dir: String,
-    /// 工作区（用户选的，DSH_CWD env + InitializeParams.cwd，spawn 后锁死）。
-    pub workspace: String,
+    /// 工作区（用户选的；None = 尚未设置，设置后锁死，决策 21）。
+    pub workspace: Option<String>,
     /// 启动时间（epoch ms）。
     pub created_at: i64,
 }
@@ -50,22 +50,26 @@ impl Bridge {
     /// 处理：组 HarnessSpawnConfig（进程目录 = process_dir，工作区进 DSH_CWD env）→ HarnessClient::spawn。
     /// 生成：Bridge（持有进程 + 管道）。
     pub async fn spawn(info: RtInfo, api_key: &str, session_root: &str) -> Result<Self, Error> {
+        let mut env = vec![
+            ("DEEPSEEK_API_KEY".to_string(), api_key.to_string()),
+            ("DSH_SESSION_ROOT".to_string(), session_root.to_string()),
+        ];
+        // 工作区可选：有则锁进 DSH_CWD；无则交给 dsh 兜底（process.cwd()）。
+        if let Some(ws) = &info.workspace {
+            env.push(("DSH_CWD".to_string(), ws.clone()));
+        }
         let client = HarnessClient::spawn(HarnessSpawnConfig {
             command: info.command.clone(),
             args: info.args.clone(),
             current_dir: info.process_dir.clone(),
-            env: vec![
-                ("DEEPSEEK_API_KEY".to_string(), api_key.to_string()),
-                ("DSH_CWD".to_string(), info.workspace.clone()),
-                ("DSH_SESSION_ROOT".to_string(), session_root.to_string()),
-            ],
+            env,
         })
         .await?;
         Ok(Self { info, client })
     }
 
-    /// initialize 握手。
-    /// 接收：provider/model/maxTokens（来自配置）。
+    /// initialize 握手（幂等，官方 server.ts 每次调用都会更新 cwd —— 补设工作区靠它）。
+    /// 接收：provider/model/maxTokens + 工作区（None 时传 ""，dsh 用 process.cwd() 兜底）。
     /// 处理：序列化 → 发送 → 校验 serverInfo。
     /// 生成：serverInfo（name/version）。
     pub async fn initialize(
@@ -75,10 +79,11 @@ impl Bridge {
         max_tokens: Option<u64>,
     ) -> Result<(String, String), Error> {
         use dshr_protocol::requests::InitializeParams;
+        let cwd = self.info.workspace.clone().unwrap_or_default();
         let result = self
             .client
             .initialize(&InitializeParams {
-                cwd: self.info.workspace.clone(),
+                cwd,
                 provider: provider.to_string(),
                 model: model.to_string(),
                 max_tokens,

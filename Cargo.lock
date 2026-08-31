@@ -653,12 +653,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
-
-[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -703,7 +697,6 @@ dependencies = [
 name = "dshr-state"
 version = "0.1.0"
 dependencies = [
- "dotenvy",
  "dshr-data",
  "dshr-protocol",
  "dshr-runtime",
@@ -720,7 +713,9 @@ version = "0.1.0"
 dependencies = [
  "dshr-protocol",
  "dshr-state",
+ "futures",
  "iced",
+ "serde_json",
 ]
 
 [[package]]

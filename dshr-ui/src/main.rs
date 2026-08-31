@@ -1,26 +1,31 @@
-//! dshr UI：简单版（全流程跑通，DESIGN §9.5 / §15-8）。
+//! dshr UI：入口（iced 应用接线）。
 //!
-//! 布局：左 runtime/会话树 + 右聊天区（消息流 + 输入框）。
-//! 事件接入：AppState 后台线程 + 100ms 轮询 tick + try_recv（流式渲染 v2 前够用）。
+//! 布局：左侧全局导航 + 按页内容（任务 / 监控 / 配置）。
+//! 事件接入：AppState 后台线程 + Subscription 事件流直收（零延迟，不再 100ms 轮询）。
 //! 工作区锁死：Start 时 cwd 定死，runtime 标题下展示路径（只读）。
 //!
-//! 分层（与 state 同风格）：
-//! - [`app`]：App 状态机（update/apply_event/订阅）
-//! - [`view`]：渲染层（view/sidebar/chat_area）
+//! 分层（每页一个文件：状态 + 处理 + 渲染）：
+//! - [`app`]：根组件（App 状态机 + 根 view 分发 + 公共渲染工具）
+//! - [`task`]：任务页（runtime 树 + 聊天；收后台事件）
+//! - [`monitor`]：监控页（数据看板，M3 占位）
+//! - [`setting`]：配置页（三配置文件编辑 + 外观）
 //! - [`message`]：Message 枚举
-//! - [`model`]：视图模型（RtView/SessionView/MsgView）
 
 mod app;
 mod message;
-mod model;
-mod view;
+mod monitor;
+mod nav;
+mod setting;
+mod task;
 
 use app::App;
 
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
-        .window_size(iced::Size::new(1100.0, 720.0))
+        .window_size(iced::Size::new(1200.0, 760.0))
         .title("dshr")
         .subscription(App::subscription)
+        // 主题跟随配置（配置页「外观」可即时切换）。
+        .theme(|app: &App| app.theme.clone())
         .run()
 }

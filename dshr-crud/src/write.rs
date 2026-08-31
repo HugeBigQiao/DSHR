@@ -42,6 +42,52 @@ pub fn archive_runtime(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// 会话归档（侧边栏隐藏，数据保留可查）。
+pub fn archive_session(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE sessions SET state = 'archived' WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// 彻底删除一个会话（决策 20：用户选择"作废"时物理删除，连坐删全部关联数据）。
+pub fn delete_session(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM events WHERE session_id = ?1", params![id])?;
+    conn.execute("DELETE FROM turns WHERE session_id = ?1", params![id])?;
+    conn.execute("DELETE FROM tool_calls WHERE session_id = ?1", params![id])?;
+    conn.execute("DELETE FROM requests WHERE session_id = ?1", params![id])?;
+    conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// 彻底删除一个 runtime（决策 20：连坐删该 runtime 下全部会话及其数据 + 日志/请求）。
+pub fn delete_runtime(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM events WHERE session_id IN (SELECT id FROM sessions WHERE runtime_id = ?1)",
+        params![id],
+    )?;
+    conn.execute(
+        "DELETE FROM turns WHERE session_id IN (SELECT id FROM sessions WHERE runtime_id = ?1)",
+        params![id],
+    )?;
+    conn.execute(
+        "DELETE FROM tool_calls WHERE session_id IN (SELECT id FROM sessions WHERE runtime_id = ?1)",
+        params![id],
+    )?;
+    conn.execute(
+        "DELETE FROM requests WHERE runtime_id = ?1 OR session_id IN (SELECT id FROM sessions WHERE runtime_id = ?1)",
+        params![id],
+    )?;
+    conn.execute("DELETE FROM sessions WHERE runtime_id = ?1", params![id])?;
+    conn.execute(
+        "DELETE FROM runtime_logs WHERE runtime_id = ?1",
+        params![id],
+    )?;
+    conn.execute("DELETE FROM runtimes WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 /// 插入一个会话。
 pub fn insert_session(
     conn: &Connection,
@@ -65,6 +111,15 @@ pub fn update_session_status(conn: &Connection, id: &str, status: &str) -> rusql
     conn.execute(
         "UPDATE sessions SET status = ?2 WHERE id = ?1",
         params![id, status],
+    )?;
+    Ok(())
+}
+
+/// 更新会话标题（session/title 事件自动写，或用户手动改名）。
+pub fn update_session_title(conn: &Connection, id: &str, title: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE sessions SET title = ?2 WHERE id = ?1",
+        params![id, title],
     )?;
     Ok(())
 }

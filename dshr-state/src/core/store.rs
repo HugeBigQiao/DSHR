@@ -59,6 +59,18 @@ impl Store {
         Ok(dshr_data::write::archive_runtime(&self.conn, id)?)
     }
 
+    pub fn delete_runtime(&self, id: &str) -> Result<(), Error> {
+        Ok(dshr_data::write::delete_runtime(&self.conn, id)?)
+    }
+
+    pub fn archive_session(&self, id: &str) -> Result<(), Error> {
+        Ok(dshr_data::write::archive_session(&self.conn, id)?)
+    }
+
+    pub fn delete_session(&self, id: &str) -> Result<(), Error> {
+        Ok(dshr_data::write::delete_session(&self.conn, id)?)
+    }
+
     // ---- session ----
     #[allow(clippy::too_many_arguments)]
     pub fn insert_session(
@@ -84,6 +96,12 @@ impl Store {
     pub fn update_session_status(&self, id: &str, status: &str) -> Result<(), Error> {
         Ok(dshr_data::write::update_session_status(
             &self.conn, id, status,
+        )?)
+    }
+
+    pub fn update_session_title(&self, id: &str, title: &str) -> Result<(), Error> {
+        Ok(dshr_data::write::update_session_title(
+            &self.conn, id, title,
         )?)
     }
 

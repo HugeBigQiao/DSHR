@@ -27,6 +27,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             parent_session_id TEXT,
             created_at        INTEGER NOT NULL,
             status            TEXT,
+            state             TEXT NOT NULL DEFAULT 'active',  -- active / archived（归档到历史）
+            title             TEXT,                            -- 会话标题（session/title 事件或用户改名）
             last_seq          INTEGER NOT NULL DEFAULT 0
         );
 
@@ -106,5 +108,13 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_requests_rt_meth ON requests(runtime_id, method);
         CREATE INDEX IF NOT EXISTS idx_logs_runtime    ON runtime_logs(runtime_id, time);
         "#,
-    )
+    )?;
+
+    // 老库迁移（决策 20）：sessions.state/title 列是后加的，已存在则报错忽略（幂等）。
+    let _ = conn.execute(
+        "ALTER TABLE sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'active'",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT", []);
+    Ok(())
 }

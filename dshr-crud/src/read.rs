@@ -11,6 +11,7 @@ pub struct SessionRow {
     pub parent_session_id: Option<String>,
     pub created_at: i64,
     pub status: Option<String>,
+    pub state: String,
     pub last_seq: i64,
 }
 
@@ -63,7 +64,7 @@ pub struct LogRow {
 /// 某 runtime 下的全部会话。
 pub fn sessions_by_runtime(conn: &Connection, runtime_id: &str) -> Result<Vec<SessionRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, runtime_id, cwd, parent_session_id, created_at, status, last_seq
+        "SELECT id, runtime_id, cwd, parent_session_id, created_at, status, state, last_seq
          FROM sessions WHERE runtime_id = ?1 ORDER BY created_at",
     )?;
     let rows = stmt.query_map(params![runtime_id], |r| {
@@ -74,7 +75,8 @@ pub fn sessions_by_runtime(conn: &Connection, runtime_id: &str) -> Result<Vec<Se
             parent_session_id: r.get(3)?,
             created_at: r.get(4)?,
             status: r.get(5)?,
-            last_seq: r.get(6)?,
+            state: r.get(6)?,
+            last_seq: r.get(7)?,
         })
     })?;
     rows.collect()

@@ -6,4 +6,6 @@ edition.workspace = true
 [dependencies]
 dshr-protocol = { path = "../dshr-protocol" }
 dshr-state = { path = "../dshr-state" }
+futures = "0.3"
 iced = { workspace = true, features = ["tokio"] }
+serde_json = { workspace = true }

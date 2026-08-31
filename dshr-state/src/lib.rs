@@ -1,15 +1,21 @@
 //! `dshr-state`：中间人——UI 与 runtime 之间的总调度。
 //!
-//! 三层（见 DESIGN §9.5）：
-//! - [`ui`]：① UI 对接层（UiEvent/Command 定义 + AppState 收发，UI 保持薄）
-//! - [`core`]：② 处理层（config/store/session/transcode，唯一"翻译官"）
-//! - [`bridge`]：③ runtime 对接层（state 内唯一 import dshr-runtime 的地方）
+//! 分层（决策 22，按页对应 UI）：
+//! - [`task`]：任务页运行时（Command/UiEvent/AppState/Engine/Bridge/文件树/48 事件处理）
+//! - [`core`]：处理层（config/store/session/transcode，唯一"翻译官"，无进程/UI 概念）
+//! - [`monitor`]：监控页查询聚合层（对 dshr-data 的 read 结果加工）
+//!
+//! setting 无独立模块：配置是同步 JSON 读写，UI 直接调 [`core::config`]。
 
-pub mod bridge;
 pub mod core;
-pub mod ui;
+pub mod monitor;
+pub mod task;
 
-pub use ui::AppState;
+pub use task::EventReceiver;
+pub use task::app::AppState;
+pub use task::bridge::{Bridge, RtInfo, SendOutcome};
+pub use task::command::Command;
+pub use task::events::{UiEvent, UiFileEntry, UiMessage, UiStatus, UiToolUse};
 
 /// state 统一错误：吸收 runtime（协议/I/O）与 rusqlite（本地库）。
 /// 分层的延续：protocol ParseError → runtime Error → 本类型 → UI 提示。

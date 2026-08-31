@@ -149,12 +149,12 @@ dshr/
 │   │   ├── bridge.rs         # ③ runtime 对接层入口
 │   │   └── bridge/           #   bridge.rs（RtInfo/Bridge，state 内唯一 import dshr-runtime）
 │   └── tests/full_round.rs   # 真实全链路测试（.env 配置驱动）
-├── dshr-data/                # ④ 本地数据层（rusqlite 加工库）：加工索引（TABLES.csv 落地）
+├── dshr-crud/                # ④ 本地数据层（rusqlite 加工库）：加工索引（TABLES.csv 落地）
+│   │                          #   注：目录名 dshr-crud，package 名仍为 dshr-data（依赖方引用 dshr_data::）
 │   ├── src/lib.rs            # open()/open_in_memory() + 分层声明
 │   ├── src/schema.rs         # 建表：7 张表 + 索引（幂等 IF NOT EXISTS，见 §6 / TABLES.csv）
 │   ├── src/write.rs          # 写入：append-only（runtimes/sessions 例外允许 update）
-│   ├── src/read.rs           # 读取：监管/历史查询入口（行查询，聚合留给 state/ui）
-│   └── tests/roundtrip.rs    # 内存库往返测试（建表+写读一致）
+│   └── src/read.rs           # 读取：监管/历史查询入口（行查询，聚合留给 state/ui）
 ├── data/                     # 本地数据库落盘目录（gitignore）：dshr.db 等
 │   └── dshr.db               # 加工索引库（dshr-data::open 的默认路径）
 ├── dshr-ui/                  # ⑤ Iced UI（bin target）
@@ -239,7 +239,7 @@ full_round 测试（dshr-state/tests）
 | `sessions` | 会话（挂 runtime 下，parent_session_id 建血缘树） | id/runtime_id/cwd/parent_session_id/created_at/status/last_seq | 插入；update：status、last_seq（增量同步书签） |
 | `requests` | 进程级+轮级请求（initialize/session_prompt/shutdown） | runtime_id/session_id/turn_id/time/method/duration_ms/success/error_message | append-only |
 | `turns` | 轮（turn/start 开行 → turn/end 回填），token 展开成列 | turn_id（state 生成：runtime_id-session_id-轮号）/reason/usage_input/output/cache_read/cache_write/reasoning/user_text/assistant_text | 开行插入，结束回填 |
-| `events` | 事件 lossless 底线：payload 原始 JSON | (session_id,seq) PK/type/time/turn/step/payload | append-only |
+| `events` | 事件 lossless 底线：payload 原始 JSON（assistant/chunk 逐 token 增量不落库，决策 19） | (session_id,seq) PK/type/time/turn/step/payload | append-only |
 | `tool_calls` | 监管命令视图直查表 | call_id/name/arguments/result_text/is_error/duration_ms/meta（工具私有载荷如 fs diff） | append-only |
 | `runtime_logs` | runtime 进程日志（stderr 等，GUI 无终端时的崩溃排查依据） | runtime_id/time/level/message | append-only |
 
@@ -256,6 +256,7 @@ events 通道（Notification{method, params}）
           ├─ assistant/message→ turns.assistant_text + token 列（usage）
           ├─ user/message     → turns.user_text
           ├─ tool/call·result → tool_calls（监管面板）
+          ├─ assistant/chunk → 跳过（决策 19：逐 token 冗余，文本全文在 assistant/message）
           └─ 其他/未知        → events 表（lossless payload）
       session.status → sessions.status
       subagent.started → sessions.parent_session_id（血缘）
@@ -339,7 +340,11 @@ dshr-state/src/
 
 ### 数据路径（B）
 
-`DSH_DATA_DIR`（.env）→ 缺省 `dshr/data/dshr.db`；未来 env 合并进 setting（toml），相对路径便于打包。
+`dshr/data/`（gitignore）：`dshr.db`（加工库）+ `config.json`（dshr 配置模板）+ `secrets.json`（API key）+ `cordis.yml`（dsh 传输配置模板）。**去 .env**（决策 12）。
+
+### UI 三页（用户拍板）
+
+顶部菜单栏切换：**任务**（现对话面板，sidebar+chat_area 原样挪入）/ **监控**（数据看板，M3 填充，先占位）/ **配置**（config.json + cordis.yml 的展示/编辑界面）。`model.rs` 加 `Page` 枚举，`app.rs` 加 `page` 字段，聊天链路逻辑不动。
 
 ## 10. 里程碑与状态
 
@@ -370,7 +375,7 @@ dshr-state/src/
 - **R3 Iced 版本 API 漂移**：0.14 较新，第三方生态跟进滞后；核心控件只用内置。**已验证**：0.14 的 `application(boot,update,view)`/`Task`（替代 Command）/`Subscription::run_with`/`stream::channel` 编译链路 OK（dshr-ui 最小窗口 ✅）。
 - **R4 unknown event 宽容**：fallback 已实现，rc.8 的 `team/*` 等扩展事件靠它兜住。
 - **R5 审批流缺失**：`ask_user_question` dead，MVP 配 `approval: never`。
-- **R6 runtime 分发与版本**：npm 包 `@deepseek-ai/dsh-sdk-jsonrpc-demo` 目前 `0.1.0-rc.8`（pre-release 无兼容承诺，升级前备份 `$DSH_HOME`）；Windows 无官方 carrier → 依赖 Node ≥22.19 或自建 exe；npm 包需锁版本。
+- **R6 runtime 分发与版本**：npm 包 `@deepseek-ai/dsh-sdk-jsonrpc-demo` 目前 `0.1.1-rc.1`（pre-release 无兼容承诺，升级前备份 `$DSH_HOME`）；Windows 无官方 carrier → 依赖 Node ≥22.19（A1 方案）；npm 包需锁版本。
 - **R7 会话 id 冲突**：复用同名 sessionId 会撞上磁盘历史日志（实测 error 回合）——客户端应使用唯一 id 或先清理会话根。
 
 ## 12. 决策记录
@@ -386,11 +391,13 @@ dshr-state/src/
 9. **错误分层**：`protocol::rpc::ParseError` + `runtime::Error`（thiserror From 链），不建单独 error crate。
 10. **事件通道结构化**：`Notification{method, params}` 出通道，state 按 method 解析。
 11. **存储后端选择**：runtime 用 jsonl（默认，格式已查证）；dshr 查询能力靠自己的 rusqlite 加工库，不 port 官方 sqlite schema。
-12. **dshr 自身配置用 TOML**（用户数据目录，如 `~/.config/dshr/config.toml`）：配置需要注释、可手改，toml crate 纯 Rust 打包无忧；`toml` 和 `json` 一样是运行时读取，不进二进制，打包后照常工作。
+12. **dshr 自身配置用 JSON**（`<data>/config.json`，gitignore 的 data 目录）：写死 `Default` 结构体 + 首次启动生成 pretty-JSON 模板 + 加载失败回退 Default（极简 confy 思路，serde_json 自写 ~20 行；confy 本身是 TOML 不满足）。**API key 等敏感项单独 `secrets.json`**，不进模板默认值。**dsh 传输配置生成 `<data>/cordis.yml`**（YAML，serde_yaml，从官方 examples/jsonrpc-agent/cordis.yml 抄基线）。**彻底去 .env**。
 13. **state 分层 = ui/core/bridge**：core/transcode 负责一切形状转换（UI→runtime、runtime→UI），UI 保持薄，runtime 保持纯净（§9.5）。
-14. **数据路径 = `DSH_DATA_DIR`**（.env）→ 缺省 `dshr/data/dshr.db`；未来 env 并入 setting（toml），相对路径便于打包（§9.5）。
+14. **数据路径 = `dshr/data/`**（数据目录，gitignore）：`dshr.db`（加工库）+ `config.json`（dshr 配置模板）+ `secrets.json`（API key 等）+ `cordis.yml`（dsh 传输配置模板）；相对路径便于打包（§9.5）。
 15. **工作区锁死**：spawn 时 `current_dir` + `InitializeParams.cwd` 钉死；cordis.yml 配 workspace-write 沙箱；UI 上 cwd 只读，换工作区 = 删 runtime 重建（archive 保留数据）。
 16. **stderr 落库**：process.rs 把 stderr 行转进 mpsc 通道 → state 写 `runtime_logs` 表（GUI 无终端时的崩溃排查依据）。
+17. **下载功能本期禁用（决策 24）**：fetch.rs 代码保留（node 检测 → 写 package.json → npm install 逐行进度 → 校验 bin），但 UI 不触发——首次启动不自动下载、配置页不显示下载/更新按钮（显示「暂未开放」）；双路径 spawn 保留，dsh 未装时回退 harness_root + tsx。待官方 1.0 稳定版后开放。
+18. **npm 镜像源**：config.json 新增 `npm_registry` 字段（默认空 = 官方 registry）；fetch 时非空则 `npm install --registry=<url>`；配置页「dsh 运行时」区块提供输入 + 保存。默认保持官方源（`@deepseek-ai/*` 包在 npmmirror 等镜像可能不全，装失败风险高）。
 
 ## 13. 关键事实与坑（已查证）
 
@@ -405,6 +412,7 @@ dshr-state/src/
 - **Excel 工具**：calamine（读）+ rust_xlsxwriter（写），纯 Rust。
 - **`session/prompt` 响应不保证先到**：第一次 prompt 先 `getOrCreateSession`（慢，期间发事件），client 必须按 id/method 区分而非顺序。
 - **rc.8 更新**：版本 rc.5→rc.8；新增 4 个 `team/*` 事件（Agent Teams，插件包模块扩展注册，不在核心 SessionEventMap）；llm-deepseek 多模态支持（验证 ContentBlock::Image）；SQLite 持久化 v2。
+- **0.1.1-rc.1 更新（08-21）**：**协议面零变化**（48 事件 / 3 请求 / 4 通知全一致，dshr 无需改动）；llm-deepseek 新增视觉模型目录 `deepseek-v4-flash-vision-exp`（text+image，实验性）+ `maxRequestImageBytes`（默认 20MiB）——provider 侧能力，dshr 的 `ContentBlock::Image` 已就绪，体验视觉模型只需改 `.env` 的 `DSH_MODEL`；#2702 会话快照投影是纯测试基础设施（jsonl 格式不变）；npm 包 bin 入口 `dsh-jsonrpc-agent` → `lib/bin.js` 未变（A1 resolve_runtime 路径不变）。
 
 ## 14. 协作方式
 
@@ -422,5 +430,7 @@ dshr-state/src/
 8. ~~**UI 简单版**~~：侧边栏 + 消息流 + 输入框，全流程跑通 ✅（用户实测）
 9. **M1 收尾**：dispose 阶梯（EOF→SIGTERM→SIGKILL）
 10. **resolve_runtime / fetch（A1 落地）**：node 检测（≥22.19，缺失引导安装）→ npm 包版本比对 → `npm install --prefix` 锁版本到管理目录 → spawn；UI 首次启动引导页显示进度（决策 6）
-11. **M3 监管面板**：工作区/会话树完善 + 数据面板（依赖 dshr-data 查询）
-12. **优化候选**：`RpcRequest` trait（消 client 方法重复，方法多了再上）
+11. **配置系统改造（决策 12）**：去 .env → `config.json` + `secrets.json` + `cordis.yml` 模板生成/加载/回退
+12. **UI 三页布局**：顶部菜单栏（任务/监控/配置）+ `Page` 枚举；聊天逻辑原样保留
+13. **M3 监管面板**：工作区/会话树完善 + 数据看板（依赖 dshr-data 查询）
+14. **优化候选**：`RpcRequest` trait（消 client 方法重复，方法多了再上）

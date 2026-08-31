@@ -9,7 +9,7 @@ use dshr_protocol::session_event::message::MessageRole;
 use dshr_protocol::session_event::{SessionEvent, message::Message};
 
 use crate::core::session::{SessionTracker, TurnFinalize};
-use crate::ui::{UiEvent, UiMessage, UiToolUse};
+use crate::task::events::{UiEvent, UiMessage, UiToolUse};
 
 /// turn/start：推进状态并返回 turn_id。
 /// 接收：归属 + turn 号 + 事件时间 + 状态机。
