@@ -4,8 +4,8 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-dshr-protocol = { path = "../dshr-protocol" }
-dshr-state = { path = "../dshr-state" }
-futures = "0.3"
-iced = { workspace = true, features = ["tokio"] }
+# "advanced" feature：自定义 widget（覆盖式菜单 Popover）需要 iced::advanced；
+# "canvas" feature：窗口控制图标自绘（— □ ✕ 统一大小）。
+iced = { workspace = true, features = ["tokio", "advanced", "canvas"] }
+serde = { workspace = true }
 serde_json = { workspace = true }

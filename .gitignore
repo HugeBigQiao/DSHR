@@ -2,16 +2,18 @@
 # Cargo 编译输出目录，几十 MB 到 GB 级，绝不上传
 /target/
 
-# === 阶段 B：runtime 可执行文件 ===
-# 决策 6：不 commit 任何 .exe，runtime 属发布产物（Release asset / 安装包）
-runtime/
-*.exe
+# === runtime 程序本体 ===
+# dsh 本体（运行时下载到 dshr/dsh/），发布不带；node portable（未来）也在这
+/dsh/
 
 # === 本地配置与临时目录 ===
 # 敏感配置（API key 等），绝不提交
 .env
 .env.*
 !.env.example
+# 本地配置（决策 12 的 config.json；v3 起 api-key 直接放这，必须忽略）
+/config.json
+/secrets.json
 
 # 冒烟/测试用工作目录
 .tmp-ws/

@@ -1,0 +1,21 @@
+[package]
+name = "dsh-sdk-client"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+dsh-sdk-protocol = { path = "../dsh-sdk-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# dispose 阶梯第 2 级（POSIX SIGTERM）用；Windows 无信号语义，直接强杀。
+libc = "0.2"
+
+[dev-dependencies]
+# 集成测试（tests/run_smoke.rs）需要 #[tokio::test] 运行时；example 直接使用协议类型。
+tokio = { workspace = true }
+serde_json = { workspace = true }
+dsh-sdk-protocol = { path = "../dsh-sdk-protocol" }
