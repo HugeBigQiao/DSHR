@@ -2,8 +2,8 @@
 //!
 //! 对应官方 transport.ts 的全部帧逻辑。零外部依赖（仅 serde/serde_json），
 //! runtime 的 transport 层只管管道 I/O，帧的形状在这里定。
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 /// 响应信封：`id` + 可选 `result`/`error`（二者有其一）。
 /// 官方：packages/sdk/protocol/src/transport.ts 的 JsonRpcResponse

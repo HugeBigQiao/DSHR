@@ -1,10 +1,11 @@
 //! 顶栏（Zed 风格）：左侧页面标签（任务/监控/配置），右侧窗口控制（— □ ✕）。
 //! 布局对齐官方设计系统：layer1 底 + 标签 active 填充 + 幽灵窗口按钮。
-//! 窗口图标用 canvas 自绘（14×14）：unicode 字符（— □ ✕）在不同字体 fallback 下
+//! 窗口图标用 canvas 自绘：unicode 字符（— □ ✕）在不同字体 fallback 下
 //! 大小不一（尤其 U+25A1 在 Segoe UI 渲染偏小），自绘保证三个图标视觉统一。
+//! 热区按桌面惯例（~44×30，KDE/Windows 同档），图标统一 16×16。
 use iced::mouse;
 use iced::widget::canvas::{Canvas, Frame, Geometry, Path, Program, Stroke};
-use iced::widget::{button, container, row, text, Space};
+use iced::widget::{Space, button, container, row, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use crate::app::{App, Message, Page, WindowCmd};
@@ -42,10 +43,7 @@ impl<Message> Program<Message> for WinIcon {
         match self.kind {
             WinIconKind::Minimize => {
                 frame.stroke(
-                    &Path::line(
-                        Point::new(w * 0.15, h * 0.5),
-                        Point::new(w * 0.85, h * 0.5),
-                    ),
+                    &Path::line(Point::new(w * 0.15, h * 0.5), Point::new(w * 0.85, h * 0.5)),
                     stroke,
                 );
             }
@@ -88,19 +86,21 @@ pub fn nav<'a>(app: &'a App) -> Element<'a, Message> {
             .style(theme::nav_button(p, app.page == target))
             .padding([6, 14])
     };
-    let win = |kind: WinIconKind, cmd: WindowCmd, size: f32| {
+    // 窗口控制按钮：热区 34×24、图标统一 13×13（紧凑档）。
+    let win = |kind: WinIconKind, cmd: WindowCmd| {
         button(
             Canvas::new(WinIcon {
                 kind,
                 color: p.label_secondary,
             })
-            .width(Length::Fixed(size))
-            .height(Length::Fixed(size)),
+            .width(Length::Fixed(13.0))
+            .height(Length::Fixed(13.0)),
         )
         .on_press(Message::Window(cmd))
         .style(theme::ghost_button(p))
-        .width(Length::Fixed(32.0))
-        .padding([5, 0])
+        .width(Length::Fixed(34.0))
+        .height(Length::Fixed(24.0))
+        .padding([0, 0])
     };
     container(row![
         tab("任务", Page::Task),
@@ -110,12 +110,11 @@ pub fn nav<'a>(app: &'a App) -> Element<'a, Message> {
         button(Space::new().width(Length::Fill))
             .on_press(Message::Window(WindowCmd::Drag))
             .style(theme::ghost_button(p)),
-        // 尺寸差异化：— / ✕ 回原字符视觉大小（12），中间 □ 略大（16）突出最大化。
-        win(WinIconKind::Minimize, WindowCmd::Minimize, 12.0),
-        win(WinIconKind::Maximize, WindowCmd::Maximize, 16.0),
-        win(WinIconKind::Close, WindowCmd::Close, 12.0),
+        win(WinIconKind::Minimize, WindowCmd::Minimize),
+        win(WinIconKind::Maximize, WindowCmd::Maximize),
+        win(WinIconKind::Close, WindowCmd::Close),
     ])
-    .padding([6, 10])
+    .padding([6, 8])
     .width(Length::Fill)
     .style(theme::surface(p, p.bg_layer1, 0.0))
     .into()

@@ -1,7 +1,8 @@
-# DSH Rust SDK — 设计文档（v4，单一信息源）
+# DSH Rust SDK — 设计文档（v5，单一信息源）
 
 > 官方参考仓库：`D:\dsh\deepseek-harness`（源码是唯一权威，本文是施工蓝图 + 决策记录）。
 > v4（2026-09）：在三层骨架（SDK + state + 桌面端）上继续——**SDK 主线已完成，UI 层在开发**。
+> v5（2026-09-02）：协议大同步至 0.1.2-alpha.5（§6.15）；配置页 Zed 化（§12.16）；§11 数据罗盘 / 统计域 / 数据管道草案。
 > 官方 TS 客户端 `@deepseek-ai/dsh-sdk-client` 与 Python SDK 是 design twin。
 
 ## 1. 定位（一句话）
@@ -76,7 +77,7 @@ dshr/
 │       ├── content_block.rs  # 内容块根 ← llm/types.ts 的 ContentBlockMap
 │       ├── content_block/    #   contentblock.rs / fallback.rs（未知块兜底）
 │       ├── session_event.rs  # SessionEvent 信封 + 判别枚举 + turn_step() ← core/session/types.ts
-│       ├── session_event/    # 事件 data 按事件族拆（48 种结构化 + Unknown；新增 3 种暂走 Unknown）
+│       ├── session_event/    # 事件 data 按事件族拆（51 种结构化 + Unknown 兜底，alpha.5 全集）
 │       ├── llm.rs            # TokenUsage/FinishReason/StreamChunk/LlmFailure ← llm/types.ts
 │       ├── notifications.rs  # 通知侧 wire 类型 + Kind 分发 ← types.ts 的 NotificationMap
 │       └── subagent.rs       # SubagentStopReason ← subagent/types.ts
@@ -191,13 +192,17 @@ App::update ── Message 分发：
 1. **定位 = Rust SDK 主线**（2026-09-01）：协议 + 客户端是核心资产；官方 UI 面是 web 组件生态，
    原生重写不划算（详见 §7 事实）；SDK 直接产品化。
 2. **runtime = `dsh --profile sdk`，锁版本**：npm `@deepseek-ai/dsh` 的 `latest` 是 0.1.1-rc.2
-   （无 sdk profile），必须显式 `@deepseek-ai/dsh@0.1.2-alpha.3`。旧侧车包（jsonrpc-demo /
-   agent-spine-demo）已从官方仓库移除（commit 244de7c18a）。
+   （无 sdk profile），必须显式 `@deepseek-ai/dsh@0.1.2-alpha.5`。2026-09-02 起锁 alpha.5
+   （此前锁 alpha.3）：官方 npm dist-tag `alpha` 已指向 0.1.2-alpha.5，而 0.1.2-alpha.3 → alpha.5
+   的 wire 无破坏性变化（事件信封/判别 tag/字段名均兼容，见 §6.15），协议按官方 master 同步。
+   旧侧车包（jsonrpc-demo / agent-spine-demo）已从官方仓库移除（commit 244de7c18a）。
 3. **DSH_HOME 独立**：spawn 时给 runtime 单独 DSH_HOME（如 `<管理目录>/home`），不碰用户 `~/.dsh`；
    工作区经 `DSH_CWD` env + `InitializeParams.cwd` 锁死。
 4. **结构化范围 = 够用即可**：现有 48 个变体保留为"尽力而为的类型化视图"（`known()` 兜底，
    字段漂移自动降级 Unknown）；**不再追官方新增事件**——新事件一律 Unknown lossless，只有
    API/消费方真需要时才加变体。官方自己要求读端宽容未知（known-event-types.ts 注释）。
+   **（2026-09-02 用户决定做协议大同步后此条不再适用：官方 known-event-types.ts 全集 51 种
+   已全部结构化，见 §6.15；§4-2 的 known()/Unknown 兜底仍保留。）**
 5. **发布策略 = 独立 crate + 生态目录**（awesome-dsh-plugin / dshget / market catalog）；
    官方树内收编等协议 1.0 稳定后（参照 python/ 进树先例）。**用户决定：发布等 SDK 全做完 + 测试完再说。**
 6. **序列化兼容**：官方新增字段一律 `Option + skip_serializing_if`（wire 可选，缺省 = 旧行为）。
@@ -234,6 +239,18 @@ App::update ── Message 分发：
     三个图标（横线/方框/叉），视觉统一。canvas 依赖 `lyon_path`（离线构建需先在线拉一次）。
 14. **state 冻结先搭 UI**（用户决定，2026-09）：dshr-state 与 SDK 链路已验证（M2.5），UI 阶段
     bridge 用占位实现（本地回显），UI 骨架完成后再和 state/SDK 对着写真实桥。commit 暂缓。
+15. **协议大同步 0.1.2-alpha.3 → 0.1.2-alpha.5**（用户决定，2026-09-02）：把协议层整体同步到
+    官方 master（= 0.1.2-alpha.5，官方 npm dist-tag `alpha` 亦指该版本）。判定：wire 无破坏性
+    变化（信封/判别 tag/字段名不变，只增不改）。同步内容：① 此前 Unknown 的 3 个事件类型化——
+    `model/selection`、`session-log-deepseek/delivery-accepted`、`subagent/model-selection-policy`
+    （官方 known-event-types.ts 全集 51 种至此全部结构化 + Unknown 兜底）；② MessageSource
+    扩展 kind 结构化（goal/user-rpc/webhook/skill-catalog/skill-invocation/agent-instructions/
+    session-reference/agent-message/subagent-settled/team-message，base 的 model 补
+    provider/model/replayState）；③ SUBAGENT_DESCRIPTOR_VERSION 2 → 3（+agentReasoningEffort）；
+    ④ team 事件版本=2（TeamMessageSnapshot 移除 delivery，读端 Option 兼容旧日志）；
+    ⑤ ImageAttachmentRef 补 optional originalDimensions。**不再追官方新增事件** 的政策自此作废；
+    后续官方新增事件仍按 §4-2 的 known() 兜底 + 有真实消费需要再结构化（本次全部结构化后，
+    该判断门槛回到"官方又新增了 known 事件"）。
 
 ## 7. 关键事实与坑（已查证）
 
@@ -290,10 +307,92 @@ App::update ── Message 分发：
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M0 dsh-sdk-protocol | 全部类型 + fallback + 帧层 | 完成（v3 同步 0.1.2-alpha.3） |
+| M0 dsh-sdk-protocol | 全部类型 + fallback + 帧层 | 完成（v4 大同步 0.1.2-alpha.5，51 事件全集结构化，见 §6.15） |
 | M1 dsh-sdk-client | HarnessClient + spawn + dispose + smoke | **完成** |
 | M2 API 对齐 | run / 订阅 / 会话树 / 图片 | **完成**（§8 全绿；剩发布） |
 | M2.5 dshr-state 重建 | 配置/记录/runtime/全链路（真实 runtime 跑通） | **完成**（真实验证：init + 2 轮 prompt，记录 232 条 dsh + 11 条 app） |
 | M3.5 UI 骨架 | 三页 + 侧边栏树 + 对话 + 覆盖菜单 + 窗口控制（占位桥） | **完成**（参考官方 + Zed；见 §6.10-13） |
 | M3.6 UI 接真实数据 | bridge 填 dshr-state（真 runtime + 真记录） | 未开始 |
 | M4 发布 | crate 打包 + README + 生态目录 | 未开始（用户暂缓） |
+| M3.7 配置页 Zed 化 | 分区导航 + 分组表单 + 主题分段（§12.16） | **完成** |
+| M3.8 数据管道（§11.4） | WireLog 回放 → fold → 落库 → UI 真 bridge（s1–s4） | 未开始 |
+
+## 11. 数据罗盘 / 统计域 / 数据管道（v5 草案，2026-09-02）
+
+> 背景：v3 曾有一整套 dshr-data（rusqlite 加工库 + §9.5 ui/core/bridge 分层），
+> 212ce27「结构文档大更」删除。全量可恢复于 git `d99a309`（`dshr-crud/src/schema.rs` 等）。
+> 本章为吸收旧设计、对齐 v4/v5 现状的新草案——**先落文档，再小步实施**。
+
+### 11.1 数据罗盘：`data/`（配置与库收进一个目录）
+
+| 路径 | 归属 | 内容 | 状态 |
+|---|---|---|---|
+| `data/dshr.db` | dshr 加工库（rusqlite） | 目录/请求/轮/工具/文件变更事实表（§11.2） | 新建（v3 同名，schema 重做） |
+| `data/config.json` | dshr 配置 | provider / model / dsh-version | 现在 workspace 根 → **迁入**（§6.16 后 UI 与 state 同改一处路径） |
+| `data/secrets.json` | dshr 敏感 | api-key（0600，不入 git） | 现在 api-key 在 config.json → **拆出** |
+| `data/dsh-home/` | dsh runtime（**不碰**） | profiles/sessions/storages/匿名 id | 现状不变 |
+| `data/wire-logs/` | dshr 记录 | 全程 JSONL（lossless 源） | 现状不变 |
+| `data/.pnpm-store/` | pnpm 缓存 | 安装 store | 现状不变（可移出 data/ 再议） |
+
+原则：**db 只含 dshr 自己的加工数据**；dsh 的会话/storages 留在 `dsh-home/`；配置与敏感项随罗盘收进 data/（runtime.rs 注释「data/ sqlite + settings（未来）」即此）。迁移做小步：config.rs/setting.rs 的 config_path 一处改 + 首启生成模板。
+
+### 11.2 dshr.db 表集（修订 v3 schema，§6.17）
+
+| 表 | 内容 | 相对 v3 |
+|---|---|---|
+| `runtimes` | id/name/state/created/command/args/cwd/env | 沿用 |
+| `sessions` | id/runtime_id/cwd/parent/created/status/state/title/last_seq | 沿用（title 由 session/title 事件写） |
+| `requests` | runtime/session/turn/method/time/duration_ms/success/error_message | 沿用 |
+| `turns` | turn_id/session/turn/started/ended/duration/reason + token 六桶列（input/output/cache_read/cache_write/reasoning/total） | 沿用 |
+| `tool_calls` | call_id/name/arguments/result_text/is_error/duration_ms/meta（= `meta.diffs` 原样 JSON） | 沿用 |
+| `file_ops` | session/turn/time/path/op(edit\|write\|delete\|str_replace)/lines_added/lines_removed | **新增**（自 meta.diffs 折叠） |
+| `runtime_logs` | runtime stderr 行（审计） | 沿用 |
+
+**不建 events 全量表**：wire-logs JSONL 已是 lossless 源，重放即查询（§9.5 转接原则同源）；
+避免双写与体积。按 (session,type) 扫描走 WireLog 重放，确有热点再加窄表。
+
+### 11.3 统计域（可统计全集——**除 chunk**）
+
+`assistant/chunk` 每 token 级、量大且无聚合价值：**不入库不聚合**，只在会话流式渲染期做内存态。
+
+其余按层级全统计（落库 = §11.2 事实表；跨层聚合 = read 层函数，不入库）：
+
+| 层 | 统计项 |
+|---|---|
+| 请求 | method / time / duration_ms / success / provider+model（request/header）/ reason（含 series）/ LlmFailure（code/status） |
+| 轮 | turn/start–end、tokens 六桶、reason、step 数（内容文本不进库——正文在会话 jsonl） |
+| 工具 | 每工具名：次数 / 成功失败 / 总耗时 / 平均耗时；call↔result 配对、error 标记 |
+| 文件 | 每 path：op 计数、+n / −m 合计、按会话/轮时间线（file_ops 表） |
+| 会话 | 起止 / 轮数 / 总 token 六桶 / 工具次数 / 错误数 / 标题（sessions+turns 聚合） |
+| runtime/日/时/模型 | 请求数、tokens、失败数、耗时（查询层按维度分组） |
+| 系统 | runtime stderr、进程退出码、spawn/退出时间 |
+
+### 11.4 数据管道层（§9.5 转接原则的 v5 落地形态）
+
+```
+wire 事件（SDK 通知 / WireLog 回放）
+   │  同一巡两个去向，同一折叠语义
+   ▼
+fold（纯函数，可测）            ──►  内存快照：消息流 / turn 统计 / 会话树
+   │                                  （model.rs 视图模型，UI 只消费它）
+   ▼
+落库（事实表写入，§11.2）      ──►  历史查询：监控页 / 会话目录 / 跨会话聚合
+```
+
+- fold 与落库**同源同巡**：dshr-state 常驻事件循环（session.rs full round 的扩展形态），每条事件先 fold 成内存快照增量、再按事实表规则写入；
+- **离线模式**：WireLog 回放走同一 fold（UI 开发/回归用，官方快照测试思路）——不 spawn runtime、不烧 token；
+- UI 视图模型升级顺序（model.rs）：`ChatState.stats` 结构化 → `MsgView` 内容块化（text/reasoning/tool 配对/notice）→ `ToolView` 挂 `meta.diffs` 渲染行级 diff；
+- 监控页（§11.3 read 聚合 + 页面）在管道 s3（真 bridge）后做，数据源与 StatsLine 同一折叠。
+
+### 11.5 小步实施（s1–s4，延续小步结对节奏）
+
+1. **s1**：`dshr-state` 新增 fold 模块（纯函数）：WireLog JSONL → `ChatSnapshot`/`StatsAccum`；测试用现有会话 fixture；
+2. **s2**：消费循环 + 落库：rusqlite `open()/init_schema()`（§11.2）+ 写入层 + 往返测试（v3 的 dshr-crud 模式）；
+3. **s3**：UI 真 bridge：占位桥换事件订阅，model.rs 升级（s1 快照形状即模型）；
+4. **s4**：监控页 + 配置页「数据」分区（罗盘状态/库大小/迁移入口）。
+
+## 12. 决策记录追加（v5）
+
+16. **配置页 Zed 化（2026-09-02，用户偏好）**：左分区导航（选中 accent 竖条）+ 右分组表单（节标题 + caption 说明行 + 输入框 Zed 式 layer2/focus-accent）；分区 = 通用/模型/运行时/API；保存仍显式按钮（config.json 非自动保存）。范围节俭——不为纯装饰新增 theme 字段，输入框样式新增 `text_field` 一处。
+17. **数据罗盘 = data/ 收口 + dshr.db 只装自己（2026-09-02，草案）**：恢复 v3 的表设计骨架但**不建 events 重复表**（wire-logs 即 lossless 源）；chunk 不入库不聚合；统计域按 §11.3 分层全集设计，除 chunk 外无遗漏项（漏项在实施时补）。
+

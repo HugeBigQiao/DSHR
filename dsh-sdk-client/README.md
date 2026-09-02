@@ -32,7 +32,7 @@ use dsh_sdk_client::subscription::Subscription;
 use dsh_sdk_protocol::requests::{InitializeParams, SdkPromptContentBlock, SessionPromptParams};
 
 // ① 拉起 runtime：node <已装 dsh 的 bin> --profile sdk
-//    dsh 安装 = npm install @deepseek-ai/dsh@0.1.2-alpha.3 --prefix <管理目录>（锁版本，勿用 latest）
+//    dsh 安装 = npm install @deepseek-ai/dsh@0.1.2-alpha.5 --prefix <管理目录>（锁版本，勿用 latest）
 let config = HarnessSpawnConfig {
     command: "node".into(),
     args: vec![

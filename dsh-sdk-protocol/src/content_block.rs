@@ -6,6 +6,6 @@ pub mod contentblock;
 pub mod fallback;
 
 pub use contentblock::{
-    ContentBlock, ImageAttachmentRef, ImageBlock, ImageMediaType, ReasoningBlock, TextBlock,
-    ToolCallBlock, ToolResultBlock,
+    ContentBlock, ImageAttachmentRef, ImageBlock, ImageMediaType, OriginalImageDimensions,
+    ReasoningBlock, TextBlock, ToolCallBlock, ToolResultBlock,
 };

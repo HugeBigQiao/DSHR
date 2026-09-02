@@ -14,10 +14,7 @@ pub enum ScheduleChangeData {
         schedule: ScheduleRecord,
     },
     #[serde(rename_all = "camelCase")]
-    Delete {
-        version: u32,
-        id: String,
-    },
+    Delete { version: u32, id: String },
     /// dispatch：一次性只有 id；固定频率带 acceptedAt（决策时刻，跳过错过的 occurrence）。
     #[serde(rename_all = "camelCase")]
     Dispatch {

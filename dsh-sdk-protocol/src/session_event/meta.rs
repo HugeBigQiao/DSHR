@@ -2,8 +2,8 @@
 //!
 //! 枚举本体在父模块 `session_event.rs`；本文件只有 `impl SessionEvent` 的只读访问器：
 //! `event_type` / `time` / `seq` / `turn_step`。事件 data 的官方引用见各变体注释。
-use super::retry;
 use super::SessionEvent;
+use super::retry;
 
 impl SessionEvent {
     /// wire 类型字符串（events 表的 type 列）。
@@ -58,6 +58,9 @@ impl SessionEvent {
             ToolCodeDispatchStart { .. } => "tool/code-dispatch-start",
             ToolCodeDispatch { .. } => "tool/code-dispatch",
             WebDeepSeekSearchLlmRequest { .. } => "web/deepseek-search-llm-request",
+            ModelSelection { .. } => "model/selection",
+            SessionLogDeepseekDeliveryAccepted { .. } => "session-log-deepseek/delivery-accepted",
+            SubagentModelSelectionPolicy { .. } => "subagent/model-selection-policy",
             Unknown { .. } => {
                 // 未知类型：返回稳定占位（调用方如需原始串可用 events.payload）。
                 "unknown"
@@ -117,6 +120,9 @@ impl SessionEvent {
             | ToolCodeDispatchStart { time, .. }
             | ToolCodeDispatch { time, .. }
             | WebDeepSeekSearchLlmRequest { time, .. }
+            | ModelSelection { time, .. }
+            | SessionLogDeepseekDeliveryAccepted { time, .. }
+            | SubagentModelSelectionPolicy { time, .. }
             | Unknown { time, .. } => *time,
         }
     }
@@ -173,6 +179,9 @@ impl SessionEvent {
             | ToolCodeDispatchStart { seq, .. }
             | ToolCodeDispatch { seq, .. }
             | WebDeepSeekSearchLlmRequest { seq, .. }
+            | ModelSelection { seq, .. }
+            | SessionLogDeepseekDeliveryAccepted { seq, .. }
+            | SubagentModelSelectionPolicy { seq, .. }
             | Unknown { seq, .. } => *seq,
         }
     }

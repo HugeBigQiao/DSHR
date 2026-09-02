@@ -11,8 +11,11 @@ pub mod fallback;
 pub mod goal;
 pub mod hook;
 pub mod message;
+pub mod message_source;
+mod meta;
 pub mod misc;
 pub mod mode;
+pub mod model;
 pub mod request;
 pub mod retry;
 pub mod schedule;
@@ -23,7 +26,6 @@ pub mod tool;
 pub mod turn;
 pub mod web;
 pub mod workflow;
-mod meta;
 
 use serde::Serialize;
 
@@ -371,6 +373,30 @@ pub enum SessionEvent {
         time: u64,
         data: web::DeepSeekSearchLlmRequestData,
     },
+    /// 会话级模型路由选择（log-only：为后续 prompt 组装记录完整已校验选择）。
+    /// 官方：packages/api/session-controller/src/types.ts 的 declare module（L35-43）。
+    #[serde(rename = "model/selection")]
+    ModelSelection {
+        seq: u64,
+        time: u64,
+        data: model::ModelSelectionData,
+    },
+    /// 官方 DeepSeek 会话日志上传收到一次送达确认（log-only）。
+    /// 官方：packages/session/session-log-deepseek/src/types.ts 的 declare module（L54-63）。
+    #[serde(rename = "session-log-deepseek/delivery-accepted")]
+    SessionLogDeepseekDeliveryAccepted {
+        seq: u64,
+        time: u64,
+        data: session::DeliveryAcceptedData,
+    },
+    /// 子代理委托暴露的模型选择策略（每会话至多一次，缺省 = 固定路由）。
+    /// 官方：packages/subagent/tool-subagent/src/model-selection-state.ts（L9-22）。
+    #[serde(rename = "subagent/model-selection-policy")]
+    SubagentModelSelectionPolicy {
+        seq: u64,
+        time: u64,
+        data: model::SubagentModelSelectionPolicyData,
+    },
     /// 未知事件类型（merge-extensible 的逃生门，lossless 保留全字段）。
     /// 官方语义：未知 + ignorable=true 可安全跳过；未知且无标记应拒绝重建。
     /// dshr 作为观察者先宽松保留，供打印/转发。
@@ -390,4 +416,3 @@ pub enum SessionEvent {
         surface_op: Option<serde_json::Value>,
     },
 }
-

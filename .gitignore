@@ -18,8 +18,12 @@
 # 冒烟/测试用工作目录
 .tmp-ws/
 
-# 本地数据库与数据文件（dshr-data 落盘目录）
+# 本地数据库与数据文件（数据罗盘 data/ 落盘目录，DESIGN §11.1）
 /data/
+# sqlite 旁路文件（dshr.db 打开时的临时/回滚/WAL 文件；若库放 data/ 外同样忽略）
+*.db-shm
+*.db-wal
+*.db-journal
 
 # === 编辑器 / IDE ===
 .vscode/
@@ -30,3 +34,7 @@
 # === 系统杂项 ===
 .DS_Store
 Thumbs.db
+
+# === 备注 ===
+# dshr-ui/assets/fonts/ 需要入库（Noto Sans SC 子集 + OFL.txt）：中文字体运行时内置，
+# 忽略会导致克隆后无法编译（main.rs include_bytes 引用）。勿加入本文件忽略规则。

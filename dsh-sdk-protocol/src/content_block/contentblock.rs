@@ -78,6 +78,21 @@ pub struct ImageAttachmentRef {
     pub height: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// 应用 EXIF 方向后、归一化缩放前的输入尺寸（官方 originalDimensions?，
+    /// attachment/src/types.ts L24-31）；仅当归一化确实缩小了图片时才出现。
+    /// 2026-09-02 大同步新增（0.1.2-alpha.5 起官方会写该字段）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_dimensions: Option<OriginalImageDimensions>,
+}
+
+/// 原图尺寸（官方 ImageAttachmentRef.originalDimensions 内联对象 {width, height}，
+/// packages/attachment/attachment/src/types.ts L24-31）。
+/// 用在 ImageAttachmentRef.original_dimensions。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginalImageDimensions {
+    pub width: u32,
+    pub height: u32,
 }
 
 /// 接受的图片格式（官方 ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'）。
@@ -92,4 +107,46 @@ pub enum ImageMediaType {
     Webp,
     #[serde(rename = "image/gif")]
     Gif,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// 0.1.2-alpha.5 官方形状：attachment 带 originalDimensions（归一化缩小过），可解析并 roundtrip。
+    #[test]
+    fn image_attachment_with_original_dimensions_roundtrips() {
+        let ref_json = json!({
+            "attachmentId": "att-1",
+            "mediaType": "image/png",
+            "bytes": 1024,
+            "width": 512,
+            "height": 512,
+            "name": "shot.png",
+            "originalDimensions": {"width": 2048, "height": 2048}
+        });
+        let parsed: ImageAttachmentRef =
+            serde_json::from_value(ref_json.clone()).expect("带 originalDimensions 应可解析");
+        assert_eq!(
+            parsed.original_dimensions,
+            Some(OriginalImageDimensions {
+                width: 2048,
+                height: 2048
+            })
+        );
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), ref_json);
+        // 缺省（未缩小）→ None，序列化不带该键。
+        let plain: ImageAttachmentRef = serde_json::from_value(json!({
+            "attachmentId": "att-2", "mediaType": "image/jpeg", "bytes": 100, "width": 10, "height": 10
+        }))
+        .expect("无 originalDimensions 应可解析");
+        assert_eq!(plain.original_dimensions, None);
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            json!({"attachmentId": "att-2", "mediaType": "image/jpeg", "bytes": 100,
+                   "width": 10, "height": 10})
+        );
+    }
 }

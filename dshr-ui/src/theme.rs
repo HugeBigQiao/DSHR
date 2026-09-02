@@ -2,7 +2,7 @@
 //!
 //! 语义名对齐 `--dsw-alias-*`；深浅两套 palette。所有自定义控件样式从这里构建——
 //! 页面代码不出现裸色值。字体对齐官方：系统栈（Segoe UI / PingFang SC / Microsoft YaHei…）。
-use iced::widget::{button, container, text_editor};
+use iced::widget::{button, container, text_editor, text_input};
 use iced::{Background, Border, Color, Shadow, Theme};
 
 /// 设计系统调色板（深浅两套，语义名对齐官方 --dsw-alias-*）。
@@ -115,11 +115,7 @@ impl Palette {
 
     /// 按深浅开关取调色板。
     pub fn pick(dark: bool) -> Self {
-        if dark {
-            Self::dark()
-        } else {
-            Self::light()
-        }
+        if dark { Self::dark() } else { Self::light() }
     }
 }
 
@@ -244,13 +240,36 @@ pub fn nav_button(p: Palette, active: bool) -> impl Fn(&Theme, button::Status) -
                 _ => Color::TRANSPARENT,
             }
         })),
-        text_color: if active { p.label_primary } else { p.label_secondary },
+        text_color: if active {
+            p.label_primary
+        } else {
+            p.label_secondary
+        },
         border: Border {
             radius: 6.0.into(),
             ..Border::default()
         },
         shadow: Shadow::default(),
         snap: false,
+    }
+}
+
+/// 文本输入框（Zed 式：layer2 底 + 圆角 + focus 时 accent 边框）。
+pub fn text_field(p: Palette) -> impl Fn(&Theme, text_input::Status) -> text_input::Style {
+    move |_, status| text_input::Style {
+        background: Background::Color(p.bg_layer2),
+        border: Border {
+            radius: 8.0.into(),
+            color: match status {
+                text_input::Status::Focused { .. } => p.accent,
+                _ => p.border_l2,
+            },
+            width: 1.0,
+        },
+        icon: p.label_caption,
+        placeholder: p.label_caption,
+        value: p.label_primary,
+        selection: p.accent,
     }
 }
 

@@ -1,10 +1,14 @@
 //! `SessionEvent` 的 fallback：手写 `Deserialize`。
 //!
 //! 官方协议是 merge-extensible（插件可注册新事件、版本会继续涨），Rust 枚举
-//! 是封闭集合，所以反序列化走"通用信封 → 按 type 分发"：已知 51 种 →
-//! 类型化变体；未知（如插件自注册事件）→ `Unknown`（全字段 lossless 保留）。
+//! 是封闭集合，所以反序列化走"通用信封 → 按 type 分发"：官方 0.1.2-alpha.5 的
+//! 51 种已知事件（known-event-types.ts 全集）→ 类型化变体；未知（如插件自注册
+//! 事件/更新版新增）→ `Unknown`（全字段 lossless 保留）。
 //! v3 起：已知类型 data 解析失败也降级 `Unknown`（lossless），不整体报错——
 //! 官方发版漂移（字段改名/枚举新增）时类型化视图失效但不丢事件、不中断解析。
+//! v4（2026-09-02 大同步）：3 个此前 Unknown 的事件已结构化（model/selection、
+//! session-log-deepseek/delivery-accepted、subagent/model-selection-policy），
+//! 51 种已知事件全部有类型化变体，Unknown 只剩真正的未知兜底。
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
@@ -66,54 +70,177 @@ impl<'de> Deserialize<'de> for SessionEvent {
         let seq = raw.seq;
         let time = raw.time;
         Ok(match raw.event_type.as_str() {
-            "turn/start" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TurnStart { seq, time, data }),
-            "turn/end" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TurnEnd { seq, time, data }),
-            "step/start" => known(&raw, &raw.data, seq, time, |data| SessionEvent::StepStart { seq, time, data }),
-            "step/end" => known(&raw, &raw.data, seq, time, |data| SessionEvent::StepEnd { seq, time, data }),
-            "user/message" => known(&raw, &raw.data, seq, time, |data| SessionEvent::UserMessage { seq, time, data }),
-            "assistant/chunk" => known(&raw, &raw.data, seq, time, |data| SessionEvent::AssistantChunk { seq, time, data }),
-            "assistant/message" => known(&raw, &raw.data, seq, time, |data| SessionEvent::AssistantMessage { seq, time, data }),
-            "tool/call" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolCall { seq, time, data }),
-            "tool/result" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolResult { seq, time, data }),
-            "todo/write" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TodoWrite { seq, time, data }),
-            "request/header" => known(&raw, &raw.data, seq, time, |data| SessionEvent::RequestHeader { seq, time, data }),
-            "request/context" => known(&raw, &raw.data, seq, time, |data| SessionEvent::RequestContext { seq, time, data }),
-            "session/end-seed" => known(&raw, &raw.data, seq, time, |data| SessionEvent::SessionEndSeed { seq, time, data }),
-            "agent-preset/selected" => known(&raw, &raw.data, seq, time, |data| SessionEvent::AgentPresetSelected { seq, time, data }),
-            "agent/inbox/spliced" => known(&raw, &raw.data, seq, time, |data| SessionEvent::AgentInboxSpliced { seq, time, data }),
-            "approval/asked" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ApprovalAsked { seq, time, data }),
-            "approval/decided" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ApprovalDecided { seq, time, data }),
-            "approval/policy" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ApprovalPolicy { seq, time, data }),
-            "permission/preset" => known(&raw, &raw.data, seq, time, |data| SessionEvent::PermissionPreset { seq, time, data }),
-            "command/run" => known(&raw, &raw.data, seq, time, |data| SessionEvent::CommandRun { seq, time, data }),
-            "command/done" => known(&raw, &raw.data, seq, time, |data| SessionEvent::CommandDone { seq, time, data }),
-            "compaction/start" => known(&raw, &raw.data, seq, time, |data| SessionEvent::CompactionStart { seq, time, data }),
-            "compaction/end" => known(&raw, &raw.data, seq, time, |data| SessionEvent::CompactionEnd { seq, time, data }),
-            "compaction/prune" => known(&raw, &raw.data, seq, time, |data| SessionEvent::CompactionPrune { seq, time, data }),
-            "compaction/summary" => known(&raw, &raw.data, seq, time, |data| SessionEvent::CompactionSummary { seq, time, data }),
-            "feedback/record" => known(&raw, &raw.data, seq, time, |data| SessionEvent::FeedbackRecord { seq, time, data }),
-            "goal/change" => known(&raw, &raw.data, seq, time, |data| SessionEvent::GoalChange { seq, time, data }),
-            "hook/invoked" => known(&raw, &raw.data, seq, time, |data| SessionEvent::HookInvoked { seq, time, data }),
-            "hook/result" => known(&raw, &raw.data, seq, time, |data| SessionEvent::HookResult { seq, time, data }),
-            "llm/retry" => known(&raw, &raw.data, seq, time, |data| SessionEvent::LlmRetry { seq, time, data }),
-            "llm/retry-started" => known(&raw, &raw.data, seq, time, |data| SessionEvent::LlmRetryStarted { seq, time, data }),
-            "plan/mode" => known(&raw, &raw.data, seq, time, |data| SessionEvent::PlanMode { seq, time, data }),
-            "sandbox/mode" => known(&raw, &raw.data, seq, time, |data| SessionEvent::SandboxMode { seq, time, data }),
-            "schedule/change" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ScheduleChange { seq, time, data }),
-            "session/title" => known(&raw, &raw.data, seq, time, |data| SessionEvent::SessionTitle { seq, time, data }),
-            "session/title-llm-request" => known(&raw, &raw.data, seq, time, |data| SessionEvent::SessionTitleLlmRequest { seq, time, data }),
-            "subagent/descriptor" => known(&raw, &raw.data, seq, time, |data| SessionEvent::SubagentDescriptor { seq, time, data }),
-            "team/member" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TeamMember { seq, time, data }),
-            "team/message/queued" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TeamMessageQueued { seq, time, data }),
-            "team/message/delivered" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TeamMessageDelivered { seq, time, data }),
-            "team/task" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TeamTask { seq, time, data }),
-            "tool-workflow/run-start" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolWorkflowRunStart { seq, time, data }),
-            "tool-workflow/run-end" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolWorkflowRunEnd { seq, time, data }),
-            "tool-workflow/agent-start" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolWorkflowAgentStart { seq, time, data }),
-            "tool-workflow/agent-end" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolWorkflowAgentEnd { seq, time, data }),
-            "tool/code-dispatch-start" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolCodeDispatchStart { seq, time, data }),
-            "tool/code-dispatch" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolCodeDispatch { seq, time, data }),
-            "web/deepseek-search-llm-request" => known(&raw, &raw.data, seq, time, |data| SessionEvent::WebDeepSeekSearchLlmRequest { seq, time, data }),
+            "turn/start" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TurnStart {
+                seq,
+                time,
+                data,
+            }),
+            "turn/end" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TurnEnd {
+                seq,
+                time,
+                data,
+            }),
+            "step/start" => known(&raw, &raw.data, seq, time, |data| SessionEvent::StepStart {
+                seq,
+                time,
+                data,
+            }),
+            "step/end" => known(&raw, &raw.data, seq, time, |data| SessionEvent::StepEnd {
+                seq,
+                time,
+                data,
+            }),
+            "user/message" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::UserMessage { seq, time, data }
+            }),
+            "assistant/chunk" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::AssistantChunk { seq, time, data }
+            }),
+            "assistant/message" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::AssistantMessage { seq, time, data }
+            }),
+            "tool/call" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolCall {
+                seq,
+                time,
+                data,
+            }),
+            "tool/result" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ToolResult { seq, time, data }
+            }),
+            "todo/write" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TodoWrite {
+                seq,
+                time,
+                data,
+            }),
+            "request/header" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::RequestHeader { seq, time, data }
+            }),
+            "request/context" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::RequestContext { seq, time, data }
+            }),
+            "session/end-seed" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::SessionEndSeed { seq, time, data }
+            }),
+            "agent-preset/selected" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::AgentPresetSelected { seq, time, data }
+            }),
+            "agent/inbox/spliced" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::AgentInboxSpliced { seq, time, data }
+            }),
+            "approval/asked" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ApprovalAsked { seq, time, data }
+            }),
+            "approval/decided" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ApprovalDecided { seq, time, data }
+            }),
+            "approval/policy" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ApprovalPolicy { seq, time, data }
+            }),
+            "permission/preset" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::PermissionPreset { seq, time, data }
+            }),
+            "command/run" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::CommandRun { seq, time, data }
+            }),
+            "command/done" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::CommandDone { seq, time, data }
+            }),
+            "compaction/start" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::CompactionStart { seq, time, data }
+            }),
+            "compaction/end" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::CompactionEnd { seq, time, data }
+            }),
+            "compaction/prune" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::CompactionPrune { seq, time, data }
+            }),
+            "compaction/summary" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::CompactionSummary { seq, time, data }
+            }),
+            "feedback/record" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::FeedbackRecord { seq, time, data }
+            }),
+            "goal/change" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::GoalChange { seq, time, data }
+            }),
+            "hook/invoked" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::HookInvoked { seq, time, data }
+            }),
+            "hook/result" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::HookResult { seq, time, data }
+            }),
+            "llm/retry" => known(&raw, &raw.data, seq, time, |data| SessionEvent::LlmRetry {
+                seq,
+                time,
+                data,
+            }),
+            "llm/retry-started" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::LlmRetryStarted { seq, time, data }
+            }),
+            "plan/mode" => known(&raw, &raw.data, seq, time, |data| SessionEvent::PlanMode {
+                seq,
+                time,
+                data,
+            }),
+            "sandbox/mode" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::SandboxMode { seq, time, data }
+            }),
+            "schedule/change" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ScheduleChange { seq, time, data }
+            }),
+            "session/title" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::SessionTitle { seq, time, data }
+            }),
+            "session/title-llm-request" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::SessionTitleLlmRequest { seq, time, data }
+            }),
+            "subagent/descriptor" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::SubagentDescriptor { seq, time, data }
+            }),
+            "team/member" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::TeamMember { seq, time, data }
+            }),
+            "team/message/queued" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::TeamMessageQueued { seq, time, data }
+            }),
+            "team/message/delivered" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::TeamMessageDelivered { seq, time, data }
+            }),
+            "team/task" => known(&raw, &raw.data, seq, time, |data| SessionEvent::TeamTask {
+                seq,
+                time,
+                data,
+            }),
+            "tool-workflow/run-start" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ToolWorkflowRunStart { seq, time, data }
+            }),
+            "tool-workflow/run-end" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ToolWorkflowRunEnd { seq, time, data }
+            }),
+            "tool-workflow/agent-start" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ToolWorkflowAgentStart { seq, time, data }
+            }),
+            "tool-workflow/agent-end" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ToolWorkflowAgentEnd { seq, time, data }
+            }),
+            "tool/code-dispatch-start" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ToolCodeDispatchStart { seq, time, data }
+            }),
+            "tool/code-dispatch" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ToolCodeDispatch { seq, time, data }
+            }),
+            "web/deepseek-search-llm-request" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::WebDeepSeekSearchLlmRequest { seq, time, data }
+            }),
+            "model/selection" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ModelSelection { seq, time, data }
+            }),
+            "session-log-deepseek/delivery-accepted" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::SessionLogDeepseekDeliveryAccepted { seq, time, data }
+            }),
+            "subagent/model-selection-policy" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::SubagentModelSelectionPolicy { seq, time, data }
+            }),
             other => SessionEvent::Unknown {
                 event_type: other.to_string(),
                 seq,

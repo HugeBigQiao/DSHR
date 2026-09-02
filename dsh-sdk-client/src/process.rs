@@ -175,14 +175,17 @@ impl RuntimeProcess {
         if exits_within(&child, eof_grace_ms).await {
             return Ok(());
         }
-        // 2. POSIX：可捕获的 SIGTERM。
+        // 2. POSIX：可捕获的 SIGTERM。id() 为 None = 进程已在窗口竞争间退出，
+        // 跳过（若把 None 当 0 发信号会打到整个进程组）。
         #[cfg(unix)]
         {
-            unsafe {
-                libc::kill(child.lock().unwrap().id() as i32, libc::SIGTERM);
-            }
-            if exits_within(&child, kill_grace_ms).await {
-                return Ok(());
+            if let Some(pid) = child.lock().unwrap().id() {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+                if exits_within(&child, kill_grace_ms).await {
+                    return Ok(());
+                }
             }
         }
         // 3. 强杀 + 有界退出确认。

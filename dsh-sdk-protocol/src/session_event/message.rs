@@ -6,24 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::content_block::ContentBlock;
 
-/// 消息来源（谁生产的这条消息）。
-/// 官方：packages/llm/llm/src/message.ts 的 MessageSourceMap
-/// 用在 Message.source（wire 上是 {kind:...} 对象）。
-/// 简化：官方还有 contextForm/provenance 等扩展字段，反序列化时自动忽略。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum MessageSource {
-    User,
-    Plugin {
-        plugin: String,
-    },
-    Model,
-    #[serde(rename_all = "camelCase")]
-    Tool {
-        // 官方 branded CallId，先用 String。
-        call_id: String,
-    },
-}
+pub use super::message_source::MessageSource;
 
 /// 消息角色。
 /// 官方：packages/llm/llm/src/message.ts 的 Message.role

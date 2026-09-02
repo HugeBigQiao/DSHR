@@ -20,7 +20,7 @@ DeepSeek Harness SDK 的 Rust wire 协议层：官方 TS 包 `@deepseek-ai/dsh-s
 | `requests/` | 请求侧：initialize / session/prompt / shutdown | `packages/sdk/protocol/src/types.ts` 的 `HarnessSdkRequestMap` |
 | `notifications.rs` | 通知侧：4 种通知 + `Kind` 分发 | `types.ts` 的 `HarnessSdkNotificationMap` |
 | `session_event.rs` | 会话事件信封 + 判别枚举 + `turn_step()` | `packages/core/session/src/types.ts` 的 `SessionEventMap` |
-| `session_event/` | 事件 data 按事件族拆（48 种结构化 + Unknown 兜底） | 各插件包 `declare module` 注册 |
+| `session_event/` | 事件 data 按事件族拆（51 种结构化 + Unknown 兜底，0.1.2-alpha.5 全集） | 各插件包 `declare module` 注册 |
 | `content_block.rs` | 内容块（text/reasoning/image/tool-call/tool-result + Unknown） | `packages/llm/llm/src/types.ts` 的 `ContentBlockMap` |
 | `llm.rs` | TokenUsage / StreamChunk / FinishReason / LlmFailure | `packages/llm/llm/src/types.ts` |
 | `subagent.rs` | SubagentStopReason | `packages/subagent/subagent/src/types.ts` |

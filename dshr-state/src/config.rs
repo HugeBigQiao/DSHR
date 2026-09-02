@@ -39,7 +39,7 @@ pub fn load(path: &Path) -> Config {
         dsh_version: v
             .get("dsh-version")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("0.1.2-alpha.3")
+            .unwrap_or("0.1.2-alpha.5")
             .to_string(),
     }
 }

@@ -46,7 +46,7 @@ rl.on('line', (line) => {
             message: {
               id: 'a1', role: 'assistant',
               content: [{ type: 'text', text: 'hello from fake' }],
-              source: { kind: 'model' },
+              source: { kind: 'model', provider: 'fake', model: 'fake-model' },
             },
             usage: { inputTokens: 1, outputTokens: 2 },
           },
