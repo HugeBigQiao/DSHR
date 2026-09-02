@@ -4,19 +4,22 @@
 //! - 顶部菜单栏：任务 / 监控 / 配置（nav.rs）
 //! - 任务页内部三区：左侧边栏（会话列表）/ 中间对话（消息流 + composer）/ 右侧预留（未来 turn rail）
 //!
-//! 数据接入：state 冻结期间走 `bridge` 的 PlaceholderBridge（演示数据）；
-//! 接 dshr-state 后换成真实桥（UI 只消费 `model` 的视图模型，不直接碰 SDK 类型）。
+//! 数据接入（s3，DESIGN §11.4）：bridge 总线（bridge.rs 类型/订阅 → worker.rs 进程驱动
+//! → real.rs Fake/Real 判定 + Folder 折叠）→ Snapshot 事件 → app.rs 刷 model 视图模型。
+//! UI 不直接碰 SDK/协议类型；PlaceholderBridge 假数据已随 s3 删除。
 
 mod app;
 mod bridge;
 mod model;
 mod monitor;
 mod nav;
+mod real;
 mod setting;
 mod statusbar;
 mod task;
 mod theme;
 mod widgets;
+mod worker;
 
 use app::App;
 

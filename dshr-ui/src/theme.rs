@@ -117,6 +117,18 @@ impl Palette {
     pub fn pick(dark: bool) -> Self {
         if dark { Self::dark() } else { Self::light() }
     }
+
+    /// 生命周期状态色（对话状态行 / 侧边栏状态点 / 底部图标栏共用）：
+    /// running 强调蓝、stopped warn（用户停止，不算错误）、failed 错误红、其余 caption 灰。
+    pub fn status_color(&self, status: crate::model::ChatStatus) -> Color {
+        use crate::model::ChatStatus;
+        match status {
+            ChatStatus::Running => self.accent,
+            ChatStatus::Stopped => self.warn,
+            ChatStatus::Failed => self.error,
+            ChatStatus::Off | ChatStatus::Idle => self.label_caption,
+        }
+    }
 }
 
 /// 圆角表面容器（官方卡片/面板：背景 + 圆角）。

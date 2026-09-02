@@ -9,7 +9,7 @@
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse;
 use iced::advanced::renderer;
-use iced::advanced::widget::{tree, Operation, Tree, Widget};
+use iced::advanced::widget::{Operation, Tree, Widget, tree};
 use iced::advanced::{self, Clipboard, Shell};
 use iced::widget::{button, column, container, text};
 use iced::{Element, Event, Length, Point, Rectangle, Renderer, Size, Vector};
@@ -92,9 +92,15 @@ where
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.host
-            .as_widget()
-            .draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport)
+        self.host.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        )
     }
 
     fn state(&self) -> tree::State {
@@ -210,7 +216,10 @@ where
 {
     fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
         let limits = layout::Limits::new(Size::ZERO, bounds);
-        let mut node = self.menu.as_widget_mut().layout(self.menu_tree, renderer, &limits);
+        let mut node = self
+            .menu
+            .as_widget_mut()
+            .layout(self.menu_tree, renderer, &limits);
         let size = node.size();
         // 右对齐到宿主右下、向下展开（官方 menu.rs：position + target_height）。
         // 偏移 +8 避开 ⋯ 底部；右缘超出视口时左移收进视口。
@@ -274,13 +283,9 @@ where
         renderer: &Renderer,
     ) -> mouse::Interaction {
         let viewport = layout.bounds();
-        self.menu.as_widget().mouse_interaction(
-            self.menu_tree,
-            layout,
-            cursor,
-            &viewport,
-            renderer,
-        )
+        self.menu
+            .as_widget()
+            .mouse_interaction(self.menu_tree, layout, cursor, &viewport, renderer)
     }
 }
 
@@ -291,15 +296,17 @@ fn build_menu<'a, Message: Clone + 'a>(
     p: theme::Palette,
     fs: f32,
 ) -> Element<'a, Message> {
-    let col = items.iter().fold(column![].spacing(1), |col, (label, msg)| {
-        col.push(
-            button(text(*label).size(fs))
-                .on_press(msg.clone())
-                .style(theme::ghost_button(p))
-                .padding([5, 12])
-                .width(Length::Shrink),
-        )
-    });
+    let col = items
+        .iter()
+        .fold(column![].spacing(1), |col, (label, msg)| {
+            col.push(
+                button(text(*label).size(fs))
+                    .on_press(msg.clone())
+                    .style(theme::ghost_button(p))
+                    .padding([5, 12])
+                    .width(Length::Shrink),
+            )
+        });
     container(col)
         .padding([4, 8])
         .style(theme::surface(p, p.bg_layer3, 8.0))

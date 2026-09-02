@@ -32,8 +32,8 @@ pub enum Message {
     ComposerEdit(iced::widget::text_editor::Action),
     /// 发送。
     Send,
-    /// 展开/收起工具卡片。
-    ToggleTool(usize),
+    /// 展开/收起工具卡片（参数 = 消息 seq：快照整体刷新后索引仍稳定）。
+    ToggleTool(u64),
 }
 
 /// 渲染三区（侧边栏收起时只留对话 + 右侧）。

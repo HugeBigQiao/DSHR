@@ -177,11 +177,14 @@ impl RuntimeProcess {
         }
         // 2. POSIX：可捕获的 SIGTERM。id() 为 None = 进程已在窗口竞争间退出，
         // 跳过（若把 None 当 0 发信号会打到整个进程组）。
+        // 注意：锁临时值先收进 let（语句末尾即释放）——if-let 模式里持有会让
+        // MutexGuard 活到块结束并跨 await，使 dispose 的 future 不满足 Send。
         #[cfg(unix)]
         {
-            if let Some(pid) = child.lock().unwrap().id() {
+            let pid = child.lock().unwrap().id();
+            if pid.is_some() {
                 unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
+                    libc::kill(pid.unwrap() as i32, libc::SIGTERM);
                 }
                 if exits_within(&child, kill_grace_ms).await {
                     return Ok(());

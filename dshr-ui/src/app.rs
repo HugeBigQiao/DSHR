@@ -1,16 +1,21 @@
 //! 根组件：App 状态机 + 根视图分发。
 //! 布局（Zed 风格）：顶栏（页面标签 + 窗口控制，兼作无边框窗框）→ 正文 → 底部图标栏。
+//!
+//! s3 真桥接线（DESIGN §11.4）：App 持有总线命令通道发送端（bridge Ready 事件交付），
+//! 按钮/发送动作 → BridgeCmd 走命令通道 → worker 驱动 runtime；worker 每通知折叠后
+//! 整发 Snapshot → 本文件把快照刷进 model 视图模型。UI 不直接 import SDK/协议类型。
+use std::collections::HashSet;
+
+use iced::futures::channel::mpsc;
 use iced::widget::text_editor;
 use iced::{Element, Length, Subscription, Task, Theme};
 
-use crate::bridge::PlaceholderBridge;
-use crate::model::{AppData, MsgView, RuntimeView, SessionView};
-use crate::monitor;
-use crate::nav;
-use crate::setting::SettingPane;
-use crate::statusbar;
-use crate::task;
-use crate::theme;
+use crate::bridge::{BridgeCmd, BridgeEvent};
+use crate::model::{AppData, ChatState, ChatStatus, RuntimeView, SessionView, session_title};
+use crate::{bridge, monitor, nav, setting, statusbar, task, theme};
+
+/// 单 runtime 槽位 id（s3 收敛为单 runtime；多 runtime 树留后续）。
+const RT_ID: &str = "rt-1";
 
 /// 三页（任务 / 监控 / 配置）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +35,7 @@ pub enum WindowCmd {
     Drag,
 }
 
-/// 根消息：分发到各页 + 窗口/布局控制。
+/// 根消息：分发到各页 + 窗口/布局控制 + bridge 事件。
 #[derive(Debug, Clone)]
 pub enum Message {
     Nav(Page),
@@ -41,6 +46,8 @@ pub enum Message {
     WindowId(iced::window::Id),
     /// 底部图标栏：收起/展开侧边栏。
     ToggleSidebar,
+    /// bridge 事件（worker → UI：启动结果/快照/停止/错误）。
+    Bridge(BridgeEvent),
 }
 
 /// 根状态。
@@ -51,7 +58,7 @@ pub struct App {
     pub dark: bool,
     /// 全局字号基准（默认 14）。
     pub font_size: u16,
-    /// 数据快照（bridge 提供；state 接入后由真实桥更新）。
+    /// 数据视图（bridge Snapshot 事件刷新；聊天区/统计/侧边栏都读它）。
     pub data: AppData,
     /// 侧边栏收起（底部图标栏切换）。
     pub sidebar_collapsed: bool,
@@ -61,31 +68,34 @@ pub struct App {
     pub hover: Option<(String, Option<String>)>,
     /// composer 草稿（多行编辑器，自动扩展高度）。
     pub composer: text_editor::Content,
+    /// 工具卡展开集合（按消息 seq 索引：快照整体刷新时索引仍稳定）。
+    pub expanded_tools: HashSet<u64>,
+    /// bridge 命令通道发送端（Ready 事件交付；None = 总线未就绪）。
+    cmd_tx: Option<mpsc::Sender<BridgeCmd>>,
+    /// Ready 到达前点过「新建 runtime」→ 就绪后补发 Start。
+    pending_start: bool,
     /// 主窗口 id（订阅捕获）。
     window_id: Option<iced::window::Id>,
-    /// TODO(bridge)：state 冻结期间用占位桥；接 state 后换真实实现（届时本字段被读取）。
-    #[allow(dead_code)]
-    bridge: PlaceholderBridge,
     /// 配置页状态。
-    setting: SettingPane,
+    setting: setting::SettingPane,
 }
 
 impl App {
     pub fn new() -> Self {
-        let bridge = PlaceholderBridge::new();
-        let data = bridge.snapshot();
         Self {
             page: Page::Task,
             dark: true,
             font_size: 14,
-            data,
+            data: AppData::default(),
             sidebar_collapsed: false,
             menu: None,
             hover: None,
             composer: text_editor::Content::new(),
+            expanded_tools: HashSet::new(),
+            cmd_tx: None,
+            pending_start: false,
             window_id: None,
-            bridge,
-            setting: SettingPane::new(),
+            setting: setting::SettingPane::new(),
         }
     }
 
@@ -97,6 +107,7 @@ impl App {
             Message::Window(cmd) => return self.window_command(cmd),
             Message::WindowId(id) => self.window_id = Some(id),
             Message::ToggleSidebar => self.sidebar_collapsed = !self.sidebar_collapsed,
+            Message::Bridge(ev) => self.handle_bridge(ev),
         }
         Task::none()
     }
@@ -114,31 +125,117 @@ impl App {
         }
     }
 
+    // —— bridge 命令发送（非阻塞：futures mpsc try_send；满则丢，UI 低频不会满）——
+
+    fn send_cmd(&mut self, cmd: BridgeCmd) {
+        if let Some(tx) = &mut self.cmd_tx {
+            let _ = tx.try_send(cmd);
+        }
+    }
+
+    // —— bridge 事件处理（worker → UI）——
+
+    fn handle_bridge(&mut self, ev: BridgeEvent) {
+        match ev {
+            BridgeEvent::Ready(tx) => {
+                self.cmd_tx = Some(tx);
+                // Ready 前点过「新建 runtime」→ 补发（总线就绪竞态）。
+                if self.pending_start {
+                    self.pending_start = false;
+                    self.send_cmd(BridgeCmd::Start);
+                }
+            }
+            BridgeEvent::Started { label, session_id } => {
+                // 新 runtime/新会话：侧边栏单槽 + 清空上一轮数据（worker 的 Folder 已重置，
+                // 紧随其后的空快照 Snapshot 再次刷新聊天区；此处先立会话行）。
+                self.expanded_tools.clear();
+                self.data.chat = ChatState {
+                    session_id: session_id.clone(),
+                    status: ChatStatus::Idle,
+                    status_line: "runtime 已启动（Fake 会随 prompt 回显事件）".to_string(),
+                    ..ChatState::new()
+                };
+                self.data.runtimes = vec![RuntimeView {
+                    id: RT_ID.to_string(),
+                    name: label,
+                    expanded: true,
+                    sessions: vec![SessionView {
+                        id: session_id.clone(),
+                        title: session_title(&None, &session_id),
+                    }],
+                    selected_session: Some(session_id),
+                }];
+            }
+            BridgeEvent::Snapshot(snap) => {
+                let sid_changed =
+                    !snap.session_id.is_empty() && snap.session_id != self.data.chat.session_id;
+                if sid_changed {
+                    // 换会话（Start/ResetSession）：展开态按新 seq 重新算。
+                    self.expanded_tools.clear();
+                }
+                self.data.chat.apply_snapshot(&snap);
+                self.sync_session_row();
+            }
+            BridgeEvent::Stopped { reason } => {
+                self.data.chat.status = ChatStatus::Stopped;
+                self.data.chat.status_line = if reason.is_empty() {
+                    "runtime 已停止（历史消息保留）".to_string()
+                } else {
+                    reason
+                };
+            }
+            BridgeEvent::Failed { reason } => {
+                self.data.chat.status = ChatStatus::Failed;
+                self.data.chat.status_line = reason;
+            }
+        }
+    }
+
+    /// 侧边栏会话行与 chat 对齐：标题（session/title 定题，否则"会话 <短id>"）+ id。
+    fn sync_session_row(&mut self) {
+        let Some(rt) = self.data.runtimes.first_mut() else {
+            return;
+        };
+        let title = session_title(&self.data.chat.title, &self.data.chat.session_id);
+        if rt.sessions.is_empty() {
+            rt.sessions.push(SessionView {
+                id: self.data.chat.session_id.clone(),
+                title,
+            });
+        } else {
+            rt.sessions[0].id = self.data.chat.session_id.clone();
+            rt.sessions[0].title = title;
+        }
+        rt.selected_session = Some(rt.sessions[0].id.clone());
+        self.data.chat.session_id = rt.sessions[0].id.clone();
+    }
+
+    // —— 任务页动作（按钮 → 真实语义）——
+
     fn handle_task(&mut self, msg: crate::task::Message) {
         match msg {
             crate::task::Message::ComposerEdit(action) => self.composer.perform(action),
             crate::task::Message::Send => self.send_draft(),
-            crate::task::Message::ToggleTool(index) => {
-                if let Some(MsgView {
-                    tool: Some(tool), ..
-                }) = self.data.chat.messages.get_mut(index)
-                {
-                    tool.expanded = !tool.expanded;
+            crate::task::Message::ToggleTool(seq) => {
+                if !self.expanded_tools.remove(&seq) {
+                    self.expanded_tools.insert(seq);
                 }
             }
             crate::task::Message::Hover(hover) => self.hover = hover,
+            crate::task::Message::MenuToggle(runtime_id, session_id) => {
+                self.menu = if self.menu == Some((runtime_id.clone(), session_id.clone())) {
+                    None
+                } else {
+                    Some((runtime_id, session_id))
+                };
+            }
             crate::task::Message::NewRuntime => {
-                let id = format!("rt-{}", self.data.runtimes.len() + 1);
-                self.data.runtimes.push(RuntimeView {
-                    id: id.clone(),
-                    name: format!("新 runtime {}", self.data.runtimes.len() + 1),
-                    expanded: true,
-                    sessions: vec![SessionView {
-                        id: format!("{id}-s1"),
-                        title: "新会话".to_string(),
-                    }],
-                    selected_session: Some(format!("{id}-s1")),
-                });
+                // = 启动 runtime（Fake/Real 判定在 worker/real.rs；已运行则 worker 忽略）。
+                if self.cmd_tx.is_some() {
+                    self.send_cmd(BridgeCmd::Start);
+                } else {
+                    self.pending_start = true; // 总线未就绪：Ready 后补发。
+                }
                 self.menu = None;
             }
             crate::task::Message::ToggleRuntimeExpand(runtime_id) => {
@@ -147,44 +244,29 @@ impl App {
                 }
             }
             crate::task::Message::NewSession(runtime_id) => {
-                if let Some(rt) = self.data.runtimes.iter_mut().find(|r| r.id == runtime_id) {
-                    let sid = format!("{}-s{}", runtime_id, rt.sessions.len() + 1);
-                    rt.sessions.push(SessionView {
-                        id: sid.clone(),
-                        title: format!("会话 {}", rt.sessions.len() + 1),
-                    });
-                    rt.selected_session = Some(sid);
-                }
+                // = 重置当前会话（新 session id；多会话管理留后续）。
+                let _ = runtime_id;
+                self.send_cmd(BridgeCmd::ResetSession);
                 self.menu = None;
             }
             crate::task::Message::DeleteRuntime(id) => {
-                self.data.runtimes.retain(|r| r.id != id);
+                // = 停止 runtime（进程 shutdown；数据删除 = store/会话树接入后的事）。
+                let _ = id;
+                self.send_cmd(BridgeCmd::Stop);
                 self.menu = None;
             }
             crate::task::Message::ArchiveRuntime(id) => {
-                // 归档 = 移除（骨架阶段；真实实现 = 标记 archived + 保留数据可查）。
-                self.data.runtimes.retain(|r| r.id != id);
-                self.menu = None;
+                // 同 DeleteRuntime（归档 = 停止；保留数据可查待 store 接线）。
+                self.handle_task(crate::task::Message::DeleteRuntime(id));
             }
             crate::task::Message::DeleteSession(runtime_id, session_id) => {
-                if let Some(rt) = self.data.runtimes.iter_mut().find(|r| r.id == runtime_id) {
-                    rt.sessions.retain(|s| s.id != session_id);
-                    if rt.selected_session.as_deref() == Some(session_id.as_str()) {
-                        rt.selected_session = rt.sessions.first().map(|s| s.id.clone());
-                    }
-                }
+                // = 重置当前会话（单会话收敛：删除即清当前，Folder 归档留后续）。
+                let _ = (runtime_id, session_id);
+                self.send_cmd(BridgeCmd::ResetSession);
                 self.menu = None;
             }
             crate::task::Message::ArchiveSession(runtime_id, session_id) => {
-                // 归档 = 移除（骨架阶段）。
                 self.handle_task(crate::task::Message::DeleteSession(runtime_id, session_id));
-            }
-            crate::task::Message::MenuToggle(runtime_id, session_id) => {
-                self.menu = if self.menu == Some((runtime_id.clone(), session_id.clone())) {
-                    None
-                } else {
-                    Some((runtime_id, session_id))
-                };
             }
             crate::task::Message::SelectSession(runtime_id, session_id) => {
                 if let Some(rt) = self.data.runtimes.iter_mut().find(|r| r.id == runtime_id) {
@@ -195,28 +277,19 @@ impl App {
         }
     }
 
-    /// 发送草稿（TODO(bridge)：交给 state → SDK；占位桥本地回显）。
+    /// 发送 composer 草稿 → 命令通道 Prompt（真管线：session/prompt → 事件 → 快照）。
+    /// 只在会话 idle 时允许（running 期间 worker 按序处理；未启动/已停时保留草稿，
+    /// 状态行已提示）。
     fn send_draft(&mut self) {
-        use crate::model::MsgKind;
         let text = self.composer.text().trim().to_string();
         if text.is_empty() {
             return;
         }
+        if self.data.chat.status != ChatStatus::Idle {
+            return;
+        }
         self.composer = text_editor::Content::default();
-        self.data.chat.messages.push(MsgView {
-            kind: MsgKind::User,
-            text,
-            reasoning: None,
-            tool: None,
-            time_label: "刚刚".to_string(),
-        });
-        self.data.chat.messages.push(MsgView {
-            kind: MsgKind::Assistant,
-            text: "（占位回复：接 dshr-state 后这里会显示真实模型输出）".to_string(),
-            reasoning: None,
-            tool: None,
-            time_label: "刚刚".to_string(),
-        });
+        self.send_cmd(BridgeCmd::Prompt { text });
     }
 
     fn handle_setting(&mut self, msg: crate::setting::Message) {
@@ -249,11 +322,7 @@ impl App {
 
     /// 当前主题（跟随 dark 开关，供 iced 内置控件默认样式）。
     pub fn theme(&self) -> Theme {
-        if self.dark {
-            Theme::Dark
-        } else {
-            Theme::Light
-        }
+        if self.dark { Theme::Dark } else { Theme::Light }
     }
 
     /// 当前设计系统调色板。
@@ -262,8 +331,11 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        // 捕获主窗口 id（窗口控制按钮用）；TODO(bridge)：接 state 事件流后再加一路。
-        iced::window::open_events().map(Message::WindowId)
+        // 主窗口 id（窗口控制）+ bridge 常驻总线（runtime 事件/命令通道）。
+        Subscription::batch([
+            iced::window::open_events().map(Message::WindowId),
+            bridge::subscribe().map(Message::Bridge),
+        ])
     }
 
     /// 全局字号（f32；iced 0.14 size 接受 `Into<Pixels>`）。

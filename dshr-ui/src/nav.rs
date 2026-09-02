@@ -39,7 +39,7 @@ impl<Message> Program<Message> for WinIcon {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let (w, h) = (bounds.width, bounds.height);
-        let stroke = Stroke::default().with_width(1.4).with_color(self.color);
+        let stroke = Stroke::default().with_width(1.0).with_color(self.color);
         match self.kind {
             WinIconKind::Minimize => {
                 frame.stroke(
@@ -86,20 +86,20 @@ pub fn nav<'a>(app: &'a App) -> Element<'a, Message> {
             .style(theme::nav_button(p, app.page == target))
             .padding([6, 14])
     };
-    // 窗口控制按钮：热区 34×24、图标统一 13×13（紧凑档）。
+    // 窗口控制按钮：热区 22×16、图标 9×9（当前档的 2/3；线宽同步减到 1.0）。
     let win = |kind: WinIconKind, cmd: WindowCmd| {
         button(
             Canvas::new(WinIcon {
                 kind,
                 color: p.label_secondary,
             })
-            .width(Length::Fixed(13.0))
-            .height(Length::Fixed(13.0)),
+            .width(Length::Fixed(9.0))
+            .height(Length::Fixed(9.0)),
         )
         .on_press(Message::Window(cmd))
         .style(theme::ghost_button(p))
-        .width(Length::Fixed(34.0))
-        .height(Length::Fixed(24.0))
+        .width(Length::Fixed(22.0))
+        .height(Length::Fixed(16.0))
         .padding([0, 0])
     };
     container(row![

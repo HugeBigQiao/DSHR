@@ -1,11 +1,13 @@
-//! 左侧边栏：runtime 树（每个 runtime = 一个 dsh 子进程）+ 会话缩进层级。
+//! 左侧边栏：runtime 树 + 会话缩进层级。
 //!
-//! 交互（Zed 风格）：
+//! s3 收敛（DESIGN §11.4）：单 runtime（= 当前 dsh/fake 进程）+ 单当前会话；
+//! 原多 runtime 假树逻辑删除，多 runtime/多会话管理留 s4。行内交互保留 Zed 风格：
 //! - 行尾 ⋯ / runtime 行 +：**常显**（纯文字，和背景同色）；
 //! - 点击 ⋯ → 覆盖式菜单（Popover 悬浮在标签上，右对齐向下展开，官方形态）；
 //! - hover 或选中时整行显示灰色框；当前选中会话常显灰框；
-//! - runtime 行可 + / − 收起会话列表；顶部「新建 runtime」居中。
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Space};
+//! - 会话行带状态点：running 高亮、idle 正常灰、stopped/failed 错误红；
+//! - 顶部「＋ 新建 runtime」= 启动 runtime（Fake/Real 判定在 worker）。
+use iced::widget::{Space, button, column, container, mouse_area, row, scrollable, text};
 use iced::{Background, Border, Color, Element, Length};
 
 use crate::app::App;
@@ -21,22 +23,33 @@ const SLOT: f32 = 30.0;
 pub fn view<'a>(app: &'a App) -> Element<'a, Message> {
     let p = app.palette();
     // 强制居中：按钮内容 = 左右对称 Space。
-    let new_rt = button(
-        row![
-            Space::new().width(Length::Fill),
-            text("＋ 新建 runtime").size(app.fs(13)),
-            Space::new().width(Length::Fill),
-        ],
-    )
+    let new_rt = button(row![
+        Space::new().width(Length::Fill),
+        text("＋ 新建 runtime").size(app.fs(13)),
+        Space::new().width(Length::Fill),
+    ])
     .on_press(Message::NewRuntime)
     .style(theme::primary_button(p))
     .padding([8, 12])
     .width(Length::Fill);
-    let tree = app
-        .data
-        .runtimes
-        .iter()
-        .fold(column![].spacing(4), |col, rt| col.push(runtime_block(app, rt)));
+    let mut tree = column![].spacing(4);
+    if app.data.runtimes.is_empty() {
+        // 未启动提示（runtime 启动后由 Started 事件插入单槽）。
+        tree = tree.push(
+            container(
+                text("未启动。\nFake：无需配置，随 prompt 回显测试事件；\n真实 dsh：需 workspace 根 config.json 配 api-key。")
+                    .size(app.fs(11))
+                    .color(p.label_caption),
+            )
+            .padding([6, 4]),
+        );
+    } else {
+        tree = app
+            .data
+            .runtimes
+            .iter()
+            .fold(tree, |col, rt| col.push(runtime_block(app, rt)));
+    }
     container(column![
         new_rt,
         // 新建按钮与下方列表的间隔（上下）。
@@ -56,7 +69,11 @@ fn runtime_block<'a>(app: &'a App, rt: &'a RuntimeView) -> Element<'a, Message> 
     let menu_open = app.menu.as_ref() == Some(&(rt.id.clone(), None));
 
     let rt_row = themed_row(
-        if hovered { Some(p.interactive_hover) } else { None },
+        if hovered {
+            Some(p.interactive_hover)
+        } else {
+            None
+        },
         row![
             text(&rt.name).size(app.fs(13)).color(p.label_primary),
             Space::new().width(Length::Fill),
@@ -114,6 +131,10 @@ fn session_row<'a>(
             None
         },
         row![
+            // 状态点：会话行反映当前会话生命周期（running 高亮 / idle 灰 / 异常红）。
+            text("●")
+                .size(app.fs(8))
+                .color(p.status_color(app.data.chat.status)),
             button(text(&s.title).size(app.fs(13)))
                 .on_press(Message::SelectSession(rt.id.clone(), s.id.clone()))
                 .style(theme::ghost_button(p))

@@ -9,3 +9,10 @@ edition.workspace = true
 iced = { workspace = true, features = ["tokio", "advanced", "canvas"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# s3 真桥（DESIGN §11.4）：SDK 客户端（spawn/initialize/prompt/shutdown/事件订阅）+ 协议类型 +
+# state 层（Folder 折叠 / config / runtime ensure）。UI 不依赖 store 落库（s2 已独立完成）。
+dsh-sdk-client = { path = "../dsh-sdk-client" }
+dsh-sdk-protocol = { path = "../dsh-sdk-protocol" }
+dshr-state = { path = "../dshr-state" }
+# iced "tokio" feature 自带 executor；worker 读循环/select 直接使用 tokio 类型（broadcast/select）。
+tokio = { workspace = true }
