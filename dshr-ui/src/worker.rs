@@ -46,6 +46,8 @@ pub struct Machine {
     last_sent: Option<SessionSnapshot>,
     /// 本地合成事件 seq（回显行用；worker 本地单调即可）。
     seq: u64,
+    /// 测试接缝：强制 Fake（headless 集成测试用；生产恒 false）。
+    fake_only: bool,
 }
 
 impl Machine {
@@ -59,7 +61,14 @@ impl Machine {
             mode: None,
             last_sent: None,
             seq: 0,
+            fake_only: false,
         }
+    }
+
+    /// 测试接缝：强制 Fake 模式（跳过 resolve_mode 的 config.json 判定——测试机
+    /// 若配了真 api-key，不能让它去拉真实 dsh）。仅测试调用。
+    pub fn force_fake(&mut self) {
+        self.fake_only = true;
     }
 
     /// 一步驱动：select（命令 ∨ 通知）→ 事件批。None = 命令通道关闭（总线结束）。
@@ -110,7 +119,14 @@ impl Machine {
         if self.client.is_some() {
             return vec![]; // 已在运行：忽略（重启 = 先 Stop 再 Start）。
         }
-        let resolved = real::resolve_mode();
+        let resolved = if self.fake_only {
+            real::ResolvedMode {
+                mode: RuntimeMode::Fake,
+                note: String::new(),
+            }
+        } else {
+            real::resolve_mode()
+        };
         let ws = real::workspace_root();
         let mut kit = match resolved.mode {
             RuntimeMode::Fake => real::kit(RuntimeMode::Fake, &ws).expect("fake 装配不应失败"),
@@ -283,4 +299,127 @@ fn epoch_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    //! headless 集成测试：不依赖 GUI，直接驱动 Machine 跑 Fake runtime 全链路——
+    //! Start → Started+空快照 → Prompt → 本地回显用户行 → SDK 通知折叠 →
+    //! assistant "hello from fake" + usage 入桶 + idle → Stop。s3 胶水层回归。
+
+    use std::time::Duration;
+
+    use dshr_state::snapshot::MsgKind;
+    use iced::futures::channel::mpsc;
+    use iced::futures::SinkExt;
+
+    use super::*;
+    use crate::bridge::BridgeEvent;
+
+    /// 轮询 next() 直到出现满足 expect 的事件（超时 8s 防挂死；已收事件随 panic 打印）。
+    async fn poll_until(
+        machine: &mut Machine,
+        expect: impl Fn(&BridgeEvent) -> bool,
+    ) -> Vec<BridgeEvent> {
+        let mut got = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            if got.iter().any(&expect) {
+                return got;
+            }
+            match tokio::time::timeout(Duration::from_millis(200), machine.next()).await {
+                Ok(Some(events)) => got.extend(events),
+                Ok(None) => panic!("命令通道提前关闭"),
+                Err(_) => {} // 通知未到：继续等
+            }
+        }
+        panic!("等待超时；已收事件：\n{got:#?}");
+    }
+
+    /// 发命令 + poll_until。
+    async fn drive(
+        machine: &mut Machine,
+        tx: &mut mpsc::Sender<BridgeCmd>,
+        cmd: BridgeCmd,
+        expect: impl Fn(&BridgeEvent) -> bool,
+    ) -> Vec<BridgeEvent> {
+        tx.send(cmd).await.expect("总线未关闭");
+        poll_until(machine, expect).await
+    }
+
+    fn first_snapshot<'a>(events: &'a [BridgeEvent]) -> Option<&'a dshr_state::snapshot::SessionSnapshot> {
+        events.iter().find_map(|e| match e {
+            BridgeEvent::Snapshot(s) => Some(s.as_ref()),
+            _ => None,
+        })
+    }
+
+    fn has_user<'a>(s: &'a dshr_state::snapshot::SessionSnapshot, text: &str) -> bool {
+        s.messages
+            .iter()
+            .any(|m| m.kind == MsgKind::User && m.text.trim() == text)
+    }
+
+    fn has_fake_reply(s: &dshr_state::snapshot::SessionSnapshot) -> bool {
+        s.messages
+            .iter()
+            .any(|m| m.kind == MsgKind::Assistant && m.text.contains("hello from fake"))
+    }
+
+    #[tokio::test]
+    async fn fake_runtime_full_round_drives_machine() {
+        let (mut tx, rx) = mpsc::channel(crate::bridge::CHANNEL_CAP);
+        let mut machine = Machine::new(rx);
+        machine.force_fake();
+
+        // 1) Start：Started（Fake label）+ 空会话快照（idle）。
+        let evs = drive(&mut machine, &mut tx, BridgeCmd::Start, |e| {
+            matches!(e, BridgeEvent::Started { .. })
+        })
+        .await;
+        assert!(
+            evs.iter().any(|e| matches!(e, BridgeEvent::Started { label, .. } if label.contains("Fake"))),
+            "Started 应带 Fake label"
+        );
+        let snap = first_snapshot(&evs).expect("Start 后应发空快照");
+        assert_eq!(snap.status, Some(SessionStatus::Idle));
+        assert!(snap.messages.is_empty());
+
+        // 2) Prompt：命令批内先见本地回显用户行（fake 不回发 user/message）。
+        let evs = drive(
+            &mut machine,
+            &mut tx,
+            BridgeCmd::Prompt {
+                text: "hi".to_string(),
+            },
+            |e| matches!(e, BridgeEvent::Snapshot(s) if has_user(s, "hi")),
+        )
+        .await;
+        let snap = first_snapshot(&evs).expect("Prompt 后应发快照");
+        assert_eq!(snap.status, Some(SessionStatus::Running));
+
+        // 3) 等 SDK 通知流：assistant "hello from fake" + usage 入桶 + idle 回落。
+        let evs = poll_until(&mut machine, |e| {
+            matches!(e, BridgeEvent::Snapshot(s) if has_fake_reply(s) && s.status == Some(SessionStatus::Idle))
+        })
+        .await;
+        let snap = first_snapshot(&evs).expect("应收到含回复的快照");
+        let reply = snap
+            .messages
+            .iter()
+            .find(|m| m.kind == MsgKind::Assistant)
+            .expect("应有一条 assistant 消息");
+        assert!(reply.text.contains("hello from fake"), "回复文本：{}", reply.text);
+        // fixture 的 assistant/message usage = input 1 / output 2。
+        assert_eq!(snap.stats.usage.input, 1);
+        assert_eq!(snap.stats.usage.output, 2);
+        assert_eq!(snap.stats.messages, 2); // User + Assistant 各一
+
+        // 4) Stop：协议 shutdown → Stopped。
+        let evs = drive(&mut machine, &mut tx, BridgeCmd::Stop, |e| {
+            matches!(e, BridgeEvent::Stopped { .. })
+        })
+        .await;
+        assert!(evs.iter().any(|e| matches!(e, BridgeEvent::Stopped { .. })));
+    }
 }
