@@ -30,12 +30,21 @@ pub async fn run_full_round(
             ("DEEPSEEK_API_KEY".to_string(), config.api_key.clone()),
             (
                 "DSH_HOME".to_string(),
-                workspace.join("data/dsh-home").to_string_lossy().into_owned(),
+                workspace
+                    .join("data/dsh-home")
+                    .to_string_lossy()
+                    .into_owned(),
             ),
-            ("DSH_CWD".to_string(), workspace.to_string_lossy().into_owned()),
+            (
+                "DSH_CWD".to_string(),
+                workspace.to_string_lossy().into_owned(),
+            ),
             (
                 "DSH_SESSION_ROOT".to_string(),
-                workspace.join("data/sessions").to_string_lossy().into_owned(),
+                workspace
+                    .join("data/sessions")
+                    .to_string_lossy()
+                    .into_owned(),
             ),
         ],
         request_timeout_ms: 30_000,
@@ -71,9 +80,16 @@ pub async fn run_full_round(
         .into_iter()
         .enumerate()
     {
-        recorder.app("run.start", &serde_json::json!({ "index": i, "prompt": text }));
+        recorder.app(
+            "run.start",
+            &serde_json::json!({ "index": i, "prompt": text }),
+        );
         let result = client
-            .run(&session_id, vec![SdkPromptContentBlock::text(text)], 120_000)
+            .run(
+                &session_id,
+                vec![SdkPromptContentBlock::text(text)],
+                120_000,
+            )
             .await
             .unwrap_or_else(|e| panic!("run#{i} 失败: {e}"));
         recorder.app(

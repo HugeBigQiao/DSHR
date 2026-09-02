@@ -16,8 +16,7 @@ pub struct Config {
 
 /// 从 config.json 加载；`provider`/`model`/`dsh-version` 缺省回退默认值。
 pub fn load(path: &Path) -> Config {
-    let text =
-        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("读 {path:?} 失败: {e}"));
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("读 {path:?} 失败: {e}"));
     let v: serde_json::Value =
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("解析 {path:?} 失败: {e}"));
     Config {

@@ -4,22 +4,21 @@
 //! - 顶部菜单栏：任务 / 监控 / 配置（nav.rs）
 //! - 任务页内部三区：左侧边栏（会话列表）/ 中间对话（消息流 + composer）/ 右侧预留（未来 turn rail）
 //!
-//! 数据接入（s3，DESIGN §11.4）：bridge 总线（bridge.rs 类型/订阅 → worker.rs 进程驱动
-//! → real.rs Fake/Real 判定 + Folder 折叠）→ Snapshot 事件 → app.rs 刷 model 视图模型。
-//! UI 不直接碰 SDK/协议类型；PlaceholderBridge 假数据已随 s3 删除。
+//! 数据接入（s3，DESIGN §11.4 / M3.6；2026-09 engine 下沉）：bridge 总线（bridge.rs
+//! 类型/订阅 → dshr_state::engine 常驻会话中台：判定/装配/事件循环/fold→快照 + 落库 +
+//! WireLog）→ Snapshot 事件 → app.rs 刷 model 视图模型。UI 只搬运命令/事件，不直接
+//! import SDK/协议类型（原 real.rs/worker.rs 已迁入 dshr-state::engine，本文件不再声明）。
 
 mod app;
 mod bridge;
 mod model;
 mod monitor;
 mod nav;
-mod real;
 mod setting;
 mod statusbar;
 mod task;
 mod theme;
 mod widgets;
-mod worker;
 
 use app::App;
 

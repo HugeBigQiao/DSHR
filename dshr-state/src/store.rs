@@ -423,7 +423,11 @@ fn replace_turns(tx: &Transaction, sid: &str, turns: &[crate::snapshot::TurnStat
 
 /// tool_calls 替换：DELETE 该会话全部 → 从消息流的 Tool 行整插。
 /// arguments/result 已在 fold 截断（≤300 字符）；meta_json 暂不写（见 DDL 注释）。
-fn replace_tool_calls(tx: &Transaction, sid: &str, msgs: &[crate::snapshot::MsgItem]) -> Result<()> {
+fn replace_tool_calls(
+    tx: &Transaction,
+    sid: &str,
+    msgs: &[crate::snapshot::MsgItem],
+) -> Result<()> {
     tx.execute("DELETE FROM tool_calls WHERE session_id = ?1", params![sid])?;
     for m in msgs {
         if m.kind != MsgKind::Tool {
@@ -568,8 +572,16 @@ mod tests {
                     false,
                     500,
                     vec![
-                        FileDiff { path: "a.rs".into(), added: 3, removed: 2 },
-                        FileDiff { path: "b.txt".into(), added: 2, removed: 0 },
+                        FileDiff {
+                            path: "a.rs".into(),
+                            added: 3,
+                            removed: 2,
+                        },
+                        FileDiff {
+                            path: "b.txt".into(),
+                            added: 2,
+                            removed: 0,
+                        },
                     ],
                 ),
             ],
@@ -604,7 +616,11 @@ mod tests {
                     },
                 },
             ],
-            stats: SessionStats { turns: 2, errors: 1, ..Default::default() },
+            stats: SessionStats {
+                turns: 2,
+                errors: 1,
+                ..Default::default()
+            },
         }
     }
 
@@ -698,7 +714,11 @@ mod tests {
             "write_file",
             false,
             10,
-            vec![FileDiff { path: "new/x.md".into(), added: 2, removed: 0 }],
+            vec![FileDiff {
+                path: "new/x.md".into(),
+                added: 2,
+                removed: 0,
+            }],
         ));
         snap.messages.push(tool_msg(
             5,
@@ -707,7 +727,11 @@ mod tests {
             "delete_file",
             true, // 工具错误如实落库
             7,
-            vec![FileDiff { path: "old.rs".into(), added: 0, removed: 3 }],
+            vec![FileDiff {
+                path: "old.rs".into(),
+                added: 0,
+                removed: 3,
+            }],
         ));
         let mut store = Store::open_in_memory().unwrap();
         store.persist_snapshot(&snap).unwrap();
@@ -718,7 +742,9 @@ mod tests {
                  FROM file_ops WHERE session_id = 's-rt1' ORDER BY seq",
             )
             .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
@@ -776,7 +802,16 @@ mod tests {
                 "SELECT id, title, status, created_at, updated_at, last_seq
                  FROM sessions WHERE id = 's-meta'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(row.0, "s-meta");

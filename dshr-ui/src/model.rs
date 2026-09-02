@@ -3,16 +3,17 @@
 //! s3 升级（DESIGN §11.4 / 里程碑 M3.6）：不再由占位桥喂假数据，而是把
 //! `dshr_state::fold::Folder` 的折叠快照（snapshot.rs 纯数据）映射成这里的形状。
 //! 依赖方向 ui → state：本模块可 import dshr_state::snapshot（共享纯数据层，
-//! 它不 import 本 crate）；UI 其它文件不直接碰 SDK/协议类型。snapshot 整体替换式
-//! 刷新（worker 每事件发一次快照，消息行/统计在映射处重建；增量传输留后续）。
+//! 它不 import 本 crate）；共享协议类型（SessionStatus/TokenUsage）经
+//! dshr_state::engine 再出口使用——UI 不直接依赖 dsh-sdk-protocol。snapshot 整体
+//! 替换式刷新（engine 每事件发一次快照，消息行/统计在映射处重建；增量传输留后续）。
 
-use dsh_sdk_protocol::notifications::SessionStatus;
+use dshr_state::engine::{SessionStatus, TokenUsage};
 use dshr_state::snapshot::{MsgItem, SessionSnapshot, ToolItem};
 
 // 消息种类直接复用 state 快照的种类（User/Assistant/Reasoning/Tool/Notice 一一对应）。
 pub use dshr_state::snapshot::MsgKind;
 
-/// 对话/运行生命周期状态（由 worker 事件 + 快照 session.status 推导）。
+/// 对话/运行生命周期状态（由 engine 事件 + 快照 session.status 推导）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatStatus {
     /// 未启动 runtime（App 初始态）。
@@ -70,7 +71,7 @@ pub struct TokenCounts {
 }
 
 impl TokenCounts {
-    fn from_usage(u: &dsh_sdk_protocol::llm::TokenUsage) -> Self {
+    fn from_usage(u: &TokenUsage) -> Self {
         Self {
             input: u.input_tokens,
             output: u.output_tokens,
@@ -268,7 +269,6 @@ pub fn session_title(title: &Option<String>, id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsh_sdk_protocol::notifications::SessionStatus;
     use dshr_state::snapshot::{FileDiff, MsgKind as SK, SessionSnapshot, SessionStats, UsageAgg};
 
     /// 手工造快照（快照是纯数据，直接构造）。

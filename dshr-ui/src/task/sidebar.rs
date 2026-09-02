@@ -6,7 +6,7 @@
 //! - 点击 ⋯ → 覆盖式菜单（Popover 悬浮在标签上，右对齐向下展开，官方形态）；
 //! - hover 或选中时整行显示灰色框；当前选中会话常显灰框；
 //! - 会话行带状态点：running 高亮、idle 正常灰、stopped/failed 错误红；
-//! - 顶部「＋ 新建 runtime」= 启动 runtime（Fake/Real 判定在 worker）。
+//! - 顶部「＋ 新建 runtime」= 启动 runtime（Fake/Real 判定在 dshr_state::engine）。
 use iced::widget::{Space, button, column, container, mouse_area, row, scrollable, text};
 use iced::{Background, Border, Color, Element, Length};
 

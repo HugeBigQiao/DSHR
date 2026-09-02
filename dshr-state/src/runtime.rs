@@ -26,12 +26,15 @@ fn parse_node_version(output: &str) -> Option<(u32, u32)> {
 /// 检测 node：PATH 上有满足版本的 node 才继续；否则报清晰错误。
 /// （自动安装 portable node 是下一步：缺失时下载官方 zip 到 `dsh/node-<ver>/`。）
 pub fn ensure_node() -> Result<(), String> {
-    let out = Command::new("node").arg("--version").output().map_err(|e| {
-        format!(
-            "未找到 node（dsh 需要 Node.js ≥{}.{}，请安装并加入 PATH，或等自动安装支持）: {e}",
-            NODE_MIN.0, NODE_MIN.1
-        )
-    })?;
+    let out = Command::new("node")
+        .arg("--version")
+        .output()
+        .map_err(|e| {
+            format!(
+                "未找到 node（dsh 需要 Node.js ≥{}.{}，请安装并加入 PATH，或等自动安装支持）: {e}",
+                NODE_MIN.0, NODE_MIN.1
+            )
+        })?;
     let text = String::from_utf8_lossy(&out.stdout);
     let Some((major, minor)) = parse_node_version(&text) else {
         return Err(format!("node --version 输出无法解析: {text}"));

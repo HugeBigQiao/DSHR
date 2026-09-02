@@ -1,16 +1,18 @@
 //! 根组件：App 状态机 + 根视图分发。
 //! 布局（Zed 风格）：顶栏（页面标签 + 窗口控制，兼作无边框窗框）→ 正文 → 底部图标栏。
 //!
-//! s3 真桥接线（DESIGN §11.4）：App 持有总线命令通道发送端（bridge Ready 事件交付），
-//! 按钮/发送动作 → BridgeCmd 走命令通道 → worker 驱动 runtime；worker 每通知折叠后
-//! 整发 Snapshot → 本文件把快照刷进 model 视图模型。UI 不直接 import SDK/协议类型。
+//! s3 真桥接线（DESIGN §11.4 / M3.6）：App 持有总线命令通道发送端（bridge Ready 事件
+//! 交付），按钮/发送动作 → BridgeCmd 走命令通道 → dshr_state::engine 常驻会话中台驱动
+//! runtime；engine 每通知折叠（并落库）后整发 Snapshot → 本文件把快照刷进 model 视图
+//! 模型。UI 只搬运命令/事件，不直接 import SDK/协议类型（engine 事件经 BridgeEvent::Engine
+//! 嵌套透传）。
 use std::collections::HashSet;
 
-use iced::futures::channel::mpsc;
 use iced::widget::text_editor;
 use iced::{Element, Length, Subscription, Task, Theme};
+use tokio::sync::mpsc;
 
-use crate::bridge::{BridgeCmd, BridgeEvent};
+use crate::bridge::{BridgeCmd, BridgeEvent, EngineEvent};
 use crate::model::{AppData, ChatState, ChatStatus, RuntimeView, SessionView, session_title};
 use crate::{bridge, monitor, nav, setting, statusbar, task, theme};
 
@@ -46,7 +48,7 @@ pub enum Message {
     WindowId(iced::window::Id),
     /// 底部图标栏：收起/展开侧边栏。
     ToggleSidebar,
-    /// bridge 事件（worker → UI：启动结果/快照/停止/错误）。
+    /// bridge 事件（engine → UI：启动结果/快照/停止/错误）。
     Bridge(BridgeEvent),
 }
 
@@ -125,7 +127,7 @@ impl App {
         }
     }
 
-    // —— bridge 命令发送（非阻塞：futures mpsc try_send；满则丢，UI 低频不会满）——
+    // —— bridge 命令发送（非阻塞：tokio mpsc try_send；满则丢，UI 低频不会满）——
 
     fn send_cmd(&mut self, cmd: BridgeCmd) {
         if let Some(tx) = &mut self.cmd_tx {
@@ -133,7 +135,7 @@ impl App {
         }
     }
 
-    // —— bridge 事件处理（worker → UI）——
+    // —— bridge 事件处理（engine → UI）——
 
     fn handle_bridge(&mut self, ev: BridgeEvent) {
         match ev {
@@ -145,8 +147,8 @@ impl App {
                     self.send_cmd(BridgeCmd::Start);
                 }
             }
-            BridgeEvent::Started { label, session_id } => {
-                // 新 runtime/新会话：侧边栏单槽 + 清空上一轮数据（worker 的 Folder 已重置，
+            BridgeEvent::Engine(EngineEvent::Started { label, session_id }) => {
+                // 新 runtime/新会话：侧边栏单槽 + 清空上一轮数据（engine 的 Folder 已重置，
                 // 紧随其后的空快照 Snapshot 再次刷新聊天区；此处先立会话行）。
                 self.expanded_tools.clear();
                 self.data.chat = ChatState {
@@ -166,7 +168,7 @@ impl App {
                     selected_session: Some(session_id),
                 }];
             }
-            BridgeEvent::Snapshot(snap) => {
+            BridgeEvent::Engine(EngineEvent::Snapshot(snap)) => {
                 let sid_changed =
                     !snap.session_id.is_empty() && snap.session_id != self.data.chat.session_id;
                 if sid_changed {
@@ -176,7 +178,7 @@ impl App {
                 self.data.chat.apply_snapshot(&snap);
                 self.sync_session_row();
             }
-            BridgeEvent::Stopped { reason } => {
+            BridgeEvent::Engine(EngineEvent::Stopped { reason }) => {
                 self.data.chat.status = ChatStatus::Stopped;
                 self.data.chat.status_line = if reason.is_empty() {
                     "runtime 已停止（历史消息保留）".to_string()
@@ -184,7 +186,7 @@ impl App {
                     reason
                 };
             }
-            BridgeEvent::Failed { reason } => {
+            BridgeEvent::Engine(EngineEvent::Failed { reason }) => {
                 self.data.chat.status = ChatStatus::Failed;
                 self.data.chat.status_line = reason;
             }
@@ -230,7 +232,7 @@ impl App {
                 };
             }
             crate::task::Message::NewRuntime => {
-                // = 启动 runtime（Fake/Real 判定在 worker/real.rs；已运行则 worker 忽略）。
+                // = 启动 runtime（Fake/Real 判定在 dshr_state::engine；已运行则 engine 忽略）。
                 if self.cmd_tx.is_some() {
                     self.send_cmd(BridgeCmd::Start);
                 } else {

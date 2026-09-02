@@ -700,8 +700,6 @@ dependencies = [
 name = "dshr-ui"
 version = "0.1.0"
 dependencies = [
- "dsh-sdk-client",
- "dsh-sdk-protocol",
  "dshr-state",
  "iced",
  "serde",

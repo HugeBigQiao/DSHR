@@ -1,29 +1,34 @@
-//! bridge 的 real 部分（原设计 src/bridge/real.rs；顶层模块化，目录整理留待后续）：
-//! Fake/Real runtime 判定 + spawn/initialize 装配 + 折叠桥（持有 Folder）。
+//! engine 的「运行模式判定 + spawn 装配」子模块。
+//!
+//! 2026-09 架构对齐（DESIGN v3 §9.5 / v4 M3.6）自 dshr-ui/src/real.rs 原样迁入：
+//! s3 曾把常驻 worker（Machine/RealBridge）错放在 dshr-ui 并让 UI 直接 import
+//! dsh-sdk-client——现整体下沉为 dshr-state::engine，本文件只做纯判定/装配，
+//! 无 UI 依赖（原来引用 dshr_state::config/runtime 的位置改为 crate:: 内部路径，
+//! 语义与注释原样保留）。
 //!
 //! 运行模式（判定集中在本文件 resolve_mode，注释清楚语义）：
 //! - `Fake`（开发/默认路径）：node 直跑 dsh-sdk-client 测试用 fake runtime
 //!   （tests/fixtures/fake_runtime.mjs，回显 "hello from fake"），无需 API key。
 //! - `Real`（真实 dsh 分支）：workspace 根 config.json 存在且 api-key 非空时才走；
-//!   provider/model/api-key/dsh-version 来自 dshr-state::config::load，dsh 本体经
-//!   dshr-state::runtime::ensure（dsh/ 目录锁版本安装）拿 bin，env/initialize 对齐
-//!   dshr-state session.rs 的全链路语义。config.json 缺失/畸形/api-key 空 → 自动
+//!   provider/model/api-key/dsh-version 来自 crate::config::load，dsh 本体经
+//!   crate::runtime::ensure（dsh/ 目录锁版本安装）拿 bin，env/initialize 对齐
+//!   crate::session.rs 的全链路语义。config.json 缺失/畸形/api-key 空 → 自动
 //!   回落 Fake（label 里说明原因，UI 状态行可见）。
 use std::path::{Path, PathBuf};
 
 use dsh_sdk_client::client::HarnessSpawnConfig;
-use dsh_sdk_protocol::notifications::{self, Kind, SessionStatus, SessionStatusNotification};
 use dsh_sdk_protocol::requests::InitializeParams;
-use dsh_sdk_protocol::rpc::Notification;
-use dsh_sdk_protocol::session_event::SessionEvent;
-use dshr_state::fold::Folder;
-use dshr_state::runtime;
 
-/// workspace 根（= dshr-ui 的上一级；config.json / dsh/ 都在这里）。
+use crate::config;
+use crate::runtime;
+
+/// workspace 根（= 本 crate（dshr-state）的父目录——DSHR 根）。
+/// 与迁入前 dshr-ui 版同语义：env!("CARGO_MANIFEST_DIR") 的 parent；
+/// config.json / dsh/ / data/ 都在这里。编译期绝对路径 → 运行时可稳定使用。
 pub fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("dshr-ui 应在 workspace 成员目录")
+        .expect("dshr-state 应在 workspace 成员目录")
         .to_path_buf()
 }
 
@@ -86,7 +91,7 @@ pub struct SpawnKit {
 
 /// 按判定模式取装配（resolve_mode 已保证 Real 分支的 config.json 可解析）。
 /// Real 的 `runtime::ensure` 可能跑 pnpm install（网络/分钟级）——同步阻塞，
-/// 调用方（worker）须用 tokio::task::spawn_blocking 包裹。
+/// 调用方（engine::Engine::start）须用 tokio::task::spawn_blocking 包裹。
 pub fn kit(mode: RuntimeMode, ws: &Path) -> Result<SpawnKit, String> {
     match mode {
         RuntimeMode::Fake => Ok(fake_kit(ws)),
@@ -110,7 +115,7 @@ fn fake_kit(ws: &Path) -> SpawnKit {
             request_timeout_ms: 5_000,
             dispose_eof_grace_ms: 2_000,
             dispose_kill_grace_ms: 1_000,
-            wire_log_path: None, // 全程记录（s2 recorder）接线时再开。
+            wire_log_path: None, // engine Start 时接线（engine.rs spawn_client：WireLog 全程记录）。
         },
         init: InitializeParams {
             cwd: ws.to_string_lossy().into_owned(),
@@ -122,10 +127,10 @@ fn fake_kit(ws: &Path) -> SpawnKit {
     }
 }
 
-/// Real：config.json → dsh 本体 ensure → spawn（env/initialize 对齐 dshr-state
-/// session.rs 全链路：DSH_HOME 独立、DSH_CWD=workspace、DSH_SESSION_ROOT 数据目录）。
+/// Real：config.json → dsh 本体 ensure → spawn（env/initialize 对齐 crate::session
+/// 全链路：DSH_HOME 独立、DSH_CWD=workspace、DSH_SESSION_ROOT 数据目录）。
 fn real_kit(ws: &Path) -> Result<SpawnKit, String> {
-    let cfg = dshr_state::config::load(&ws.join("config.json"));
+    let cfg = config::load(&ws.join("config.json"));
     // dsh/ 目录锁版本安装（runtime.rs ensure：缺 bin 时 pnpm install）。
     let dsh_dir = ws.join("dsh");
     let bin = runtime::ensure(&dsh_dir, &cfg.dsh_version);
@@ -155,7 +160,7 @@ fn real_kit(ws: &Path) -> Result<SpawnKit, String> {
             request_timeout_ms: 30_000,
             dispose_eof_grace_ms: 2_000,
             dispose_kill_grace_ms: 1_000,
-            wire_log_path: None, // 同上：s2 recorder 接线时开。
+            wire_log_path: None, // engine Start 时接线（engine.rs spawn_client：WireLog 全程记录）。
         },
         init: InitializeParams {
             cwd: ws.to_string_lossy().into_owned(),
@@ -165,80 +170,4 @@ fn real_kit(ws: &Path) -> Result<SpawnKit, String> {
             max_tokens: None,
         },
     })
-}
-
-/// 折叠桥：单会话 Folder 持有者 + wire 通知喂入。
-///
-/// s3 简化：一次只折叠「一个当前会话」（多 runtime/多会话目录与血缘 = s4，
-/// 届时按 session_id 各持一个 Folder 即可，折叠语义不变）。Start/ResetSession
-/// 时 reset()（换新 session id），Stop 不清（UI 保留已收消息）。
-#[derive(Debug, Default)]
-pub struct RealBridge {
-    pub folder: Folder,
-}
-
-impl RealBridge {
-    pub fn new() -> Self {
-        Self {
-            folder: Folder::new(),
-        }
-    }
-
-    /// 清空折叠态（新会话/新 runtime）。
-    pub fn reset(&mut self) {
-        self.folder = Folder::new();
-    }
-
-    /// 喂一条 SDK 通知（wire 帧 → notifications::parse → Folder::push_notification）。
-    /// 只折 `session_id` 对应会话的通知：session.event/session.status 先按
-    /// params.sessionId 过滤（子代理血缘会话 s3 不显示，直接跳过）；
-    /// subagent.* 等其余通知 Folder 侧本身忽略。
-    pub fn feed(&mut self, session_id: &str, n: &Notification) {
-        if n.method == "session.event" || n.method == "session.status" {
-            let sid = n
-                .params
-                .get("sessionId")
-                .and_then(serde_json::Value::as_str);
-            if sid != Some(session_id) {
-                return;
-            }
-        }
-        match notifications::parse(n) {
-            Ok(Some(kind)) => self.folder.push_notification(&kind),
-            // Ok(None)：未知通知方法（协议演进跳过）；Err：内容畸形（跳过，wire 保真留 recorder）。
-            _ => {}
-        }
-    }
-
-    /// 直接置会话状态（worker 用于 prompt 后乐观 running / 新会话 idle）。
-    /// 走与 wire 同一条折叠路径（合成一条 session.status 通知）。
-    pub fn set_status(&mut self, session_id: &str, status: SessionStatus) {
-        self.folder
-            .push_notification(&Kind::SessionStatus(SessionStatusNotification {
-                session_id: session_id.to_string(),
-                status,
-            }));
-    }
-
-    /// 本地补一条用户消息行（fake runtime 不发送 user/message——回显用户自己的
-    /// prompt；真实 runtime 会自己发 user/message，不补、防重复）。
-    /// 走官方 wire 形状 JSON → SessionEvent → push_event（与 fold.rs 测试同构）。
-    pub fn push_local_user_message(&mut self, text: &str, seq: u64, time: u64) {
-        let ev: SessionEvent = serde_json::from_value(serde_json::json!({
-            "type": "user/message", "seq": seq, "time": time,
-            "data": {
-                "id": format!("m-ui-{seq}"),
-                "role": "user",
-                "content": [{ "type": "text", "text": text }],
-                "source": { "kind": "user" },
-            },
-        }))
-        .expect("官方 user/message 形状应可解析（fold.rs 测试同构）");
-        self.folder.push_event(&ev);
-    }
-
-    /// 当前快照（每次调用重建，轻量）。
-    pub fn snapshot(&self) -> dshr_state::snapshot::SessionSnapshot {
-        self.folder.snapshot()
-    }
 }

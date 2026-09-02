@@ -312,7 +312,7 @@ App::update ── Message 分发：
 | M2 API 对齐 | run / 订阅 / 会话树 / 图片 | **完成**（§8 全绿；剩发布） |
 | M2.5 dshr-state 重建 | 配置/记录/runtime/全链路（真实 runtime 跑通） | **完成**（真实验证：init + 2 轮 prompt，记录 232 条 dsh + 11 条 app） |
 | M3.5 UI 骨架 | 三页 + 侧边栏树 + 对话 + 覆盖菜单 + 窗口控制（占位桥） | **完成**（参考官方 + Zed；见 §6.10-13） |
-| M3.6 UI 接真实数据 | bridge 填 dshr-state（真 runtime + 真记录） | 未开始 |
+| M3.6 UI 接真实数据 | bridge 填 dshr-state（engine 中台 + 真 runtime + 真记录） | **完成**（engine 中台 + 落库 + WireLog；s4 监控页待做） |
 | M4 发布 | crate 打包 + README + 生态目录 | 未开始（用户暂缓） |
 | M3.7 配置页 Zed 化 | 分区导航 + 分组表单 + 主题分段（§12.16） | **完成** |
 | M3.8 数据管道（§11.4） | WireLog 回放 → fold → 落库 → UI 真 bridge（s1–s4） | 未开始 |
@@ -384,6 +384,8 @@ fold（纯函数，可测）            ──►  内存快照：消息流 / tu
 - UI 视图模型升级顺序（model.rs）：`ChatState.stats` 结构化 → `MsgView` 内容块化（text/reasoning/tool 配对/notice）→ `ToolView` 挂 `meta.diffs` 渲染行级 diff；
 - 监控页（§11.3 read 聚合 + 页面）在管道 s3（真 bridge）后做，数据源与 StatsLine 同一折叠。
 
+engine 落地（2026-09）：常驻会话中台在 `dshr-state::engine`，UI 只搬运命令/事件；落库 + WireLog 已接线。
+
 ### 11.5 小步实施（s1–s4，延续小步结对节奏）
 
 1. **s1**：`dshr-state` 新增 fold 模块（纯函数）：WireLog JSONL → `ChatSnapshot`/`StatsAccum`；测试用现有会话 fixture；
@@ -395,4 +397,5 @@ fold（纯函数，可测）            ──►  内存快照：消息流 / tu
 
 16. **配置页 Zed 化（2026-09-02，用户偏好）**：左分区导航（选中 accent 竖条）+ 右分组表单（节标题 + caption 说明行 + 输入框 Zed 式 layer2/focus-accent）；分区 = 通用/模型/运行时/API；保存仍显式按钮（config.json 非自动保存）。范围节俭——不为纯装饰新增 theme 字段，输入框样式新增 `text_field` 一处。
 17. **数据罗盘 = data/ 收口 + dshr.db 只装自己（2026-09-02，草案）**：恢复 v3 的表设计骨架但**不建 events 重复表**（wire-logs 即 lossless 源）；chunk 不入库不聚合；统计域按 §11.3 分层全集设计，除 chunk 外无遗漏项（漏项在实施时补）。
+18. **engine 下沉：常驻会话中台进 dshr-state（2026-09，架构对齐 DESIGN v3 §9.5 / v4 M3.6 意图）**：s3 曾把常驻 worker（Machine/RealBridge，dshr-ui worker.rs/real.rs）放在 UI 旁并让 UI 直接 import dsh-sdk-client，旁路 state 层。现整体下沉为 `dshr-state::engine`（判定/装配/事件循环/fold→快照 + 落库 + WireLog 全在 state 侧），dshr-ui 只经 bridge 搬运命令/事件，不再直接依赖 dsh-sdk-client/dsh-sdk-protocol；原 worker/real 文件废弃待删。
 
