@@ -32,12 +32,33 @@ pub struct MsgItem {
     pub reasoning: Option<String>,
     /// Assistant 消息的 token 账目（来自 assistant/message data.usage；Reasoning 行同源携带）。
     pub usage: Option<TokenUsage>,
+    /// v3 流记录摘要（来自 assistant/message data.stream；用于回放/延迟展示）。
+    pub stream: Option<StreamSummary>,
     /// Tool 行的卡片内容。
     pub tool: Option<ToolItem>,
     /// 事件 time（dsh 侧 epoch ms，信封印章；Tool 行 = tool/call 的时刻）。
     pub time: u64,
     /// 事件 seq（稳定排序/增量书签）。
     pub seq: u64,
+}
+
+/// 一次 assistant 流记录的统计摘要（不保留逐 chunk 内容，避免快照重复克隆）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StreamSummary {
+    /// 展开后的 chunk 总数。
+    pub chunks: u64,
+    /// 第一个 chunk 的时间戳（epoch ms）。
+    pub first_time: Option<u64>,
+    /// 最后一个 chunk 的时间戳。
+    pub last_time: Option<u64>,
+    /// 第一个 text/reasoning/tool-call 增量时间（近似首 token）。
+    pub first_token_time: Option<u64>,
+    /// text 增量的字符数。
+    pub text_chars: u64,
+    /// reasoning 增量的字符数。
+    pub reasoning_chars: u64,
+    /// tool-call 参数增量的字符数。
+    pub tool_args_chars: u64,
 }
 
 /// 工具调用卡片（对照 dshr-ui model.rs 的 ToolView 并扩展 result/diffs）。

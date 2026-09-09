@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use dsh_sdk_protocol::content_block::ContentBlock;
+use dsh_sdk_protocol::llm::{AssistantStreamRecord, StreamChunk};
 use dsh_sdk_protocol::notifications;
 use dsh_sdk_protocol::notifications::SessionStatus;
 use dsh_sdk_protocol::rpc;
@@ -18,7 +19,8 @@ use dsh_sdk_protocol::session_event::tool::{ToolCallData, ToolResultData};
 use dsh_sdk_protocol::session_event::turn::{TurnEndCancelCause, TurnEndData, TurnEndReason};
 
 use crate::snapshot::{
-    FileDiff, MsgItem, MsgKind, SessionSnapshot, SessionStats, ToolItem, TurnStat, UsageAgg,
+    FileDiff, MsgItem, MsgKind, SessionSnapshot, SessionStats, StreamSummary, ToolItem, TurnStat,
+    UsageAgg,
 };
 
 /// 折叠状态机：喂事件 → 内部态推进 → `snapshot()` 出不可变快照。
@@ -98,10 +100,11 @@ impl Folder {
             StepEnd { .. } => {}
             // —— 折叠：消息 ——
             UserMessage { seq, time, data } => self.on_user_message(*seq, *time, data),
+            // system/message 是派生 surface 的系统提示，s1 暂不折入消息流。
+            SystemMessage { .. } => {}
             AssistantMessage { seq, time, data } => self.on_assistant_message(*seq, *time, data),
-            // 忽略：assistant/chunk 每 token 级、量大且无聚合价值——不入库不聚合，
-            // 只在会话流式渲染期做内存态（DESIGN §11.3）；正文一律以 assistant/message 为准。
-            AssistantChunk { .. } => {}
+            // assistant/attempt 没有提交 surface 消息，不入库不聚合。
+            AssistantAttempt { .. } => {}
             // —— 折叠：工具（call ↔ result 按 call_id 配对）——
             ToolCall { seq, time, data } => self.on_tool_call(*seq, *time, data),
             ToolResult { time, data, .. } => self.on_tool_result(*time, data),
@@ -147,6 +150,7 @@ impl Folder {
             CompactionPrune { .. } => {} // 剪枝计量（影子价格）是内部成本记账，无折叠价值。
             TodoWrite { .. } => {} // todo 整表快照是"日志 UI 状态"（官方注释），非消息流；s4 任务视图。
             FeedbackRecord { .. } => {} // log-only（官方：永不进模型上下文/历史）。
+            FeedbackMessagePut { .. } | FeedbackMessageDelete { .. } => {} // 消息反馈 log-only。
             GoalChange { .. } => {} // 目标快照+墓碑；s4 目标视图（UI 未消费，别过度建模）。
             RequestHeader { .. } => {} // 下次请求头快照 → 请求层统计（§11.3）；s2 落库用。
             RequestContext { .. } => {} // 模型路由元数据，同上。
@@ -170,7 +174,7 @@ impl Folder {
             | ToolWorkflowRunEnd { .. }
             | ToolWorkflowAgentStart { .. }
             | ToolWorkflowAgentEnd { .. } => {} // 工具工作流内部编排；s4 工作流视图。
-            ToolCodeDispatchStart { .. } | ToolCodeDispatch { .. } => {} // code-mode 子调用：
+            ToolPtcDispatchStart { .. } | ToolPtcDispatch { .. } => {} // PTC mode 子调用：
             // run_code 的 diff 已由 tool/result meta 折叠，
             // 子调用不再计（防重复计数）。
             WebDeepSeekSearchLlmRequest { .. } => {} // 搜索辅助请求快照；无折叠值。
@@ -318,6 +322,7 @@ impl Folder {
             text: text_of(&msg.content),
             reasoning: None,
             usage: None,
+            stream: None,
             tool: None,
             time,
             seq,
@@ -335,6 +340,7 @@ impl Folder {
         let text = text_of(&data.message.content);
         let reasoning = reasoning_of(&data.message.content);
         let usage = data.usage.clone();
+        let stream = data.stream.as_deref().map(stream_summary);
         if text.is_empty() && reasoning.is_none() {
             // content 只有 tool-call/image/未知块：不产行——工具行由 tool/call+result
             // 配对产生，附件渲染 s3；usage 已在上方入账。
@@ -351,6 +357,7 @@ impl Folder {
             text,
             reasoning,
             usage,
+            stream,
             tool: None,
             time,
             seq,
@@ -366,6 +373,7 @@ impl Folder {
             text: String::new(),
             reasoning: None,
             usage: None,
+            stream: None,
             tool: Some(ToolItem {
                 call_id: data.call_id.clone(),
                 name: data.name.clone(),
@@ -438,10 +446,55 @@ impl Folder {
             text: truncate_chars(&text, 200),
             reasoning: None,
             usage: None,
+            stream: None,
             tool: None,
             time,
             seq,
         });
+    }
+}
+
+/// 把 v3 `AssistantStreamRecord` 展开成统计摘要（不保留逐 chunk，控制快照体积）。
+fn stream_summary(records: &[AssistantStreamRecord]) -> StreamSummary {
+    let mut summary = StreamSummary::default();
+    for record in records {
+        for timed in record.expand() {
+            summary.chunks += 1;
+            summary.first_time = Some(
+                summary
+                    .first_time
+                    .map_or(timed.time, |value| value.min(timed.time)),
+            );
+            summary.last_time = Some(
+                summary
+                    .last_time
+                    .map_or(timed.time, |value| value.max(timed.time)),
+            );
+            match timed.chunk {
+                StreamChunk::TextDelta { text, .. } => {
+                    summary.text_chars += text.chars().count() as u64;
+                    mark_first_token(&mut summary, timed.time);
+                }
+                StreamChunk::ReasoningDelta { text, .. } => {
+                    summary.reasoning_chars += text.chars().count() as u64;
+                    mark_first_token(&mut summary, timed.time);
+                }
+                StreamChunk::ToolCallDelta {
+                    arguments_delta, ..
+                } => {
+                    summary.tool_args_chars += arguments_delta.chars().count() as u64;
+                    mark_first_token(&mut summary, timed.time);
+                }
+                _ => {}
+            }
+        }
+    }
+    summary
+}
+
+fn mark_first_token(summary: &mut StreamSummary, time: u64) {
+    if summary.first_token_time.is_none() {
+        summary.first_token_time = Some(time);
     }
 }
 
@@ -881,9 +934,9 @@ mod tests {
         assert_eq!(s.stats.messages, 2);
     }
 
-    /// assistant/chunk 不入聚合：消息文本以 assistant/message 为准，行数与统计不受 chunk 影响。
+    /// assistant/attempt 不入聚合：消息文本以 assistant/message 为准，行数与统计不受 attempt 影响。
     #[test]
-    fn chunks_do_not_touch_text_or_stats() {
+    fn attempts_do_not_touch_text_or_stats() {
         let mut f = Folder::new();
         push(
             &mut f,
@@ -892,12 +945,11 @@ mod tests {
             "content":[{"type":"text","text":"流式"}],
             "source":{"kind":"user"}}}),
         );
-        for (i, part) in ["一点点", "又一点"].iter().enumerate() {
+        for i in 0..2u64 {
             push(
                 &mut f,
-                json!({"type":"assistant/chunk","seq":(2 + i) as u64,"time":110,"data":{
-                "turn":1,"step":1,
-                "chunk":{"type":"text-delta","index":0,"text":part}}}),
+                json!({"type":"assistant/attempt","seq":2 + i,"time":110,"data":{
+                "turn":1,"step":1,"stream":[]}}),
             );
         }
         push(

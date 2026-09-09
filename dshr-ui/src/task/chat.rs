@@ -9,6 +9,7 @@ use crate::app::App;
 use crate::model::{ChatStatus, MsgKind, MsgView, short_id, stats_line};
 use crate::task::Message;
 use crate::theme;
+use dshr_state::snapshot::StreamSummary;
 
 /// 渲染对话区。
 pub fn view<'a>(app: &'a App) -> Element<'a, Message> {
@@ -103,15 +104,19 @@ fn render_message<'a>(app: &'a App, msg: &'a MsgView) -> Element<'a, Message> {
             time(app, msg),
         ]
         .into(),
-        MsgKind::Assistant => column![
-            text("dsh").size(app.fs(11)).color(p.accent),
-            container(text(&msg.text).size(app.fs(14)).color(p.label_primary))
-                .width(Length::Fill)
-                .padding(10)
-                .style(theme::surface(p, p.bubble, 10.0)),
-            time(app, msg),
-        ]
-        .into(),
+        MsgKind::Assistant => {
+            let mut col = column![
+                text("dsh").size(app.fs(11)).color(p.accent),
+                container(text(&msg.text).size(app.fs(14)).color(p.label_primary))
+                    .width(Length::Fill)
+                    .padding(10)
+                    .style(theme::surface(p, p.bubble, 10.0)),
+            ];
+            if let Some(stream) = &msg.stream {
+                col = col.push(stream_caption(app, stream));
+            }
+            col.push(time(app, msg)).into()
+        }
         MsgKind::Reasoning => container(
             text(msg.reasoning.clone().unwrap_or_default())
                 .size(app.fs(12))
@@ -134,6 +139,31 @@ fn time<'a>(app: &'a App, msg: &'a MsgView) -> Element<'a, Message> {
     text(&msg.time_label)
         .size(app.fs(10))
         .color(app.palette().label_caption)
+        .into()
+}
+
+/// v3 流记录摘要（首 token 延迟 / 时长 / 文本量）；真正的逐 token 直播需要上游 live 通知。
+fn stream_caption<'a>(app: &'a App, stream: &StreamSummary) -> Element<'a, Message> {
+    let p = app.palette();
+    let mut parts = vec![format!("流记录 {} chunks", stream.chunks)];
+    if let (Some(first), Some(token)) = (stream.first_time, stream.first_token_time) {
+        parts.push(format!("首 token +{}ms", token.saturating_sub(first)));
+    }
+    if let (Some(first), Some(last)) = (stream.first_time, stream.last_time) {
+        parts.push(format!("时长 {}ms", last.saturating_sub(first)));
+    }
+    if stream.text_chars > 0 {
+        parts.push(format!("text {} chars", stream.text_chars));
+    }
+    if stream.reasoning_chars > 0 {
+        parts.push(format!("reasoning {} chars", stream.reasoning_chars));
+    }
+    if stream.tool_args_chars > 0 {
+        parts.push(format!("tool args {} chars", stream.tool_args_chars));
+    }
+    text(parts.join(" · "))
+        .size(app.fs(10))
+        .color(p.label_caption)
         .into()
 }
 

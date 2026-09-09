@@ -53,25 +53,20 @@ pub struct ResolvedMode {
 /// 否则自动回落 Fake。软判定：文件缺失/解析失败一律回落 Fake（开发机无 key 的常态）。
 pub fn resolve_mode() -> ResolvedMode {
     let path = workspace_root().join("config.json");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => {
-            return ResolvedMode {
-                mode: RuntimeMode::Fake,
-                note: "无 config.json".to_string(),
-            };
-        }
-    };
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => match v.get("api-key").and_then(serde_json::Value::as_str) {
-            Some(key) if !key.trim().is_empty() => ResolvedMode {
-                mode: RuntimeMode::Real,
-                note: String::new(),
-            },
-            _ => ResolvedMode {
-                mode: RuntimeMode::Fake,
-                note: "config.json 未配置 api-key".to_string(),
-            },
+    if !path.exists() {
+        return ResolvedMode {
+            mode: RuntimeMode::Fake,
+            note: "无 config.json".to_string(),
+        };
+    }
+    match config::try_load(&path) {
+        Ok(cfg) if cfg.has_api_key() => ResolvedMode {
+            mode: RuntimeMode::Real,
+            note: String::new(),
+        },
+        Ok(_) => ResolvedMode {
+            mode: RuntimeMode::Fake,
+            note: "未配置 API key".to_string(),
         },
         Err(_) => ResolvedMode {
             mode: RuntimeMode::Fake,
@@ -130,10 +125,14 @@ fn fake_kit(ws: &Path) -> SpawnKit {
 /// Real：config.json → dsh 本体 ensure → spawn（env/initialize 对齐 crate::session
 /// 全链路：DSH_HOME 独立、DSH_CWD=workspace、DSH_SESSION_ROOT 数据目录）。
 fn real_kit(ws: &Path) -> Result<SpawnKit, String> {
-    let cfg = config::load(&ws.join("config.json"));
-    // dsh/ 目录锁版本安装（runtime.rs ensure：缺 bin 时 pnpm install）。
+    let cfg = config::try_load(&ws.join("config.json"))?;
+    let api_key = cfg
+        .api_key
+        .clone()
+        .ok_or_else(|| "未配置 API key".to_string())?;
+    // dsh/ 目录锁版本安装/升级（runtime.rs ensure：版本不匹配时 pnpm install --force）。
     let dsh_dir = ws.join("dsh");
-    let bin = runtime::ensure(&dsh_dir, &cfg.dsh_version);
+    let bin = runtime::ensure(&dsh_dir, &cfg.dsh_version)?;
     Ok(SpawnKit {
         mode: RuntimeMode::Real,
         label: format!("dsh runtime · {}", cfg.model),
@@ -146,7 +145,7 @@ fn real_kit(ws: &Path) -> Result<SpawnKit, String> {
             ],
             current_dir: ws.to_string_lossy().into_owned(),
             env: vec![
-                ("DEEPSEEK_API_KEY".to_string(), cfg.api_key.clone()),
+                ("DEEPSEEK_API_KEY".to_string(), api_key),
                 (
                     "DSH_HOME".to_string(),
                     ws.join("data/dsh-home").to_string_lossy().into_owned(),

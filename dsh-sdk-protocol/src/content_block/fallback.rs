@@ -1,13 +1,13 @@
 //! `ContentBlock` 的 fallback：手写 `Deserialize`。
 //!
 //! 官方协议是 merge-extensible（插件可注册新块类型），Rust 枚举是封闭集合，
-//! 所以反序列化走"通用信封 → 按 type 分发"：已知 5 种 → 类型化变体；
+//! 所以反序列化走"通用信封 → 按 type 分发"：已知 6 种 → 类型化变体；
 //! 未知 → `Unknown`（原始字段 lossless 保留）。
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
 use super::contentblock::{
-    ContentBlock, ImageBlock, ReasoningBlock, TextBlock, ToolCallBlock, ToolResultBlock,
+    ContentBlock, FileBlock, ImageBlock, ReasoningBlock, TextBlock, ToolCallBlock, ToolResultBlock,
 };
 
 /// 通用信封：不判别，先接住一切。
@@ -25,7 +25,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
         // 手写反序列化的核心分发：
         // 接收：任意内容块 JSON。
         // 处理：先解通用信封（type + 其余字段扁平收集），再按 type 分发——
-        //       已知 5 种 → 解成对应 Block 结构体（含递归）；
+        //       已知 6 种 → 解成对应 Block 结构体（含递归）；
         //       未知 → 字段原样保留进 Unknown（lossless）。
         // 生成：类型化的 ContentBlock。
         let raw = RawBlock::deserialize(d)?;
@@ -43,6 +43,10 @@ impl<'de> Deserialize<'de> for ContentBlock {
             "image" => {
                 let b: ImageBlock = serde_json::from_value(rest).map_err(de::Error::custom)?;
                 ContentBlock::Image(b)
+            }
+            "file" => {
+                let b: FileBlock = serde_json::from_value(rest).map_err(de::Error::custom)?;
+                ContentBlock::File(b)
             }
             "tool-call" => {
                 let b: ToolCallBlock = serde_json::from_value(rest).map_err(de::Error::custom)?;

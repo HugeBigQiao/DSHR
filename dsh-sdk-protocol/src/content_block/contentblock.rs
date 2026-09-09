@@ -1,4 +1,4 @@
-//! `ContentBlock` 类型定义：枚举 + 官方 5 种块 + 图片支持类型。
+//! `ContentBlock` 类型定义：枚举 + 官方 6 种块 + 图片支持类型。
 //!
 //! 对应官方 `packages/llm/llm/src/types.ts` 的 `ContentBlockMap`。
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ pub enum ContentBlock {
     Text(TextBlock),
     Reasoning(ReasoningBlock),
     Image(ImageBlock),
+    File(FileBlock),
     ToolCall(ToolCallBlock),
     ToolResult(ToolResultBlock),
     /// 未知块类型（插件扩展面，lossless 保留原始字段）。
@@ -42,6 +43,12 @@ pub struct ReasoningBlock {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageBlock {
     pub attachment: ImageAttachmentRef,
+}
+
+/// 官方 FileBlock：{ type:'file', attachment }。用在 ContentBlock::File。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileBlock {
+    pub attachment: FileAttachmentRef,
 }
 
 /// 官方 ToolCallBlock：{ type:'tool-call', id, name, arguments }。用在 ContentBlock::ToolCall。
@@ -83,6 +90,16 @@ pub struct ImageAttachmentRef {
     /// 2026-09-02 大同步新增（0.1.2-alpha.5 起官方会写该字段）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_dimensions: Option<OriginalImageDimensions>,
+}
+
+/// 文件的持久化引用（官方 packages/attachment/attachment/src/types.ts 的 FileAttachmentRef）。
+/// 用在 FileBlock.attachment。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileAttachmentRef {
+    pub attachment_id: String,
+    pub name: String,
+    pub bytes: u64,
 }
 
 /// 原图尺寸（官方 ImageAttachmentRef.originalDimensions 内联对象 {width, height}，

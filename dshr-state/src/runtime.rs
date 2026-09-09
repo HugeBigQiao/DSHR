@@ -51,14 +51,20 @@ pub fn ensure_node() -> Result<(), String> {
     }
 }
 
-/// 确保 dsh 本体已装到 `dsh_dir`（`<workspace>/dsh`）；返回 bin 绝对路径（已存在则直接返回）。
-/// store：`DSHR_PNPM_STORE` 非空时指到它（受控环境/测试用）；空 = pnpm 默认全局 store（正式桌面端共享去重）。
-pub fn ensure(dsh_dir: &Path, version: &str) -> PathBuf {
-    let bin = dsh_dir.join(DSH_BIN_REL);
-    if bin.exists() {
-        return bin;
-    }
-    std::fs::create_dir_all(dsh_dir).expect("建 dsh 目录");
+/// 已安装的 `@deepseek-ai/dsh` 版本（读安装包 package.json；缺失/损坏 = None）。
+fn installed_version(dsh_dir: &Path) -> Option<String> {
+    let manifest = dsh_dir.join("node_modules/@deepseek-ai/dsh/package.json");
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// 写入/覆盖 `dsh/package.json` 与 `pnpm-workspace.yaml`，声明目标版本。
+fn write_manifest(dsh_dir: &Path, version: &str) -> Result<(), String> {
+    std::fs::create_dir_all(dsh_dir).map_err(|e| format!("建 dsh 目录失败: {e}"))?;
     let manifest = serde_json::json!({
         "name": "dshr-dsh-runtime",
         "private": true,
@@ -67,26 +73,26 @@ pub fn ensure(dsh_dir: &Path, version: &str) -> PathBuf {
     });
     std::fs::write(
         dsh_dir.join("package.json"),
-        serde_json::to_string_pretty(&manifest).expect("序列化 package.json"),
+        serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("序列化 package.json 失败: {e}"))?,
     )
-    .expect("写 package.json");
+    .map_err(|e| format!("写 package.json 失败: {e}"))?;
     // 对齐官方 profile（packages/boot/app-boot/src/profile.ts 的 PROFILE_PNPM_WORKSPACE）：hoisted 平铺。
-    // 2026-09-01 实测：node-pty/koffi 的 tarball 自带预编译产物（prebuilds/），
-    // `--ignore-scripts` 安装后 runtime 完整可用——正式路线免 node-gyp/Python/MSVC 工具链。
     std::fs::write(
         dsh_dir.join("pnpm-workspace.yaml"),
         "packages:\n  - .\n\nnodeLinker: hoisted\n",
     )
-    .expect("写 pnpm-workspace.yaml");
+    .map_err(|e| format!("写 pnpm-workspace.yaml 失败: {e}"))?;
+    Ok(())
+}
 
-    // Windows 上 pnpm 是 .cmd shim，Rust Command 不做 PATHEXT 解析——显式带扩展名。
-    // --ignore-scripts：跳过依赖构建脚本（原生模块走 tarball 预编译产物，见上注释）。
-    // --config.minimumReleaseAge=0：pnpm 供应链年龄策略默认会拒绝刚发布的 alpha 包
-    // （@deepseek-ai/* 每次发版都是新包，等够年龄不现实）——正式桌面端同样需要关掉。
+/// 在 `dsh_dir` 执行 `pnpm install --force`，确保切换版本后 node_modules 真正重装。
+fn pnpm_install(dsh_dir: &Path) -> Result<(), String> {
     let pnpm = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
     let mut cmd = Command::new(pnpm);
     cmd.args([
         "install",
+        "--force",
         "--ignore-scripts",
         "--config.minimumReleaseAge=0",
     ]);
@@ -95,8 +101,96 @@ pub fn ensure(dsh_dir: &Path, version: &str) -> PathBuf {
             cmd.arg(format!("--store-dir={store}"));
         }
     }
-    let status = cmd.current_dir(dsh_dir).status().expect("跑 pnpm install");
-    assert!(status.success(), "pnpm install 失败（exit {status}）");
-    assert!(bin.exists(), "pnpm 成功但 dsh bin 缺失（包结构变化？）");
-    bin
+    let status = cmd
+        .current_dir(dsh_dir)
+        .status()
+        .map_err(|e| format!("运行 {pnpm} install 失败（请确认 pnpm 在 PATH）: {e}"))?;
+    if !status.success() {
+        return Err(format!("pnpm install 失败（exit {status}）"));
+    }
+    Ok(())
+}
+
+/// 确保 `dsh_dir` 下的 `@deepseek-ai/dsh` 是 `version`：
+/// - 版本匹配且 bin 存在 → 直接返回；
+/// - 版本缺失/不匹配 → 重写 package.json 并 `pnpm install --force`，安装后再次校验。
+/// 返回 bin 绝对路径。
+pub fn ensure(dsh_dir: &Path, version: &str) -> Result<PathBuf, String> {
+    ensure_node()?;
+    let bin = dsh_dir.join(DSH_BIN_REL);
+    let installed = installed_version(dsh_dir);
+    if installed.as_deref() == Some(version) && bin.exists() {
+        return Ok(bin);
+    }
+
+    write_manifest(dsh_dir, version)?;
+    pnpm_install(dsh_dir)?;
+
+    let installed = installed_version(dsh_dir);
+    if installed.as_deref() != Some(version) {
+        return Err(format!(
+            "dsh runtime 版本不匹配：期望 {version}，实际 {}",
+            installed
+                .as_deref()
+                .unwrap_or("未知（未读到安装包 package.json）")
+        ));
+    }
+    if !bin.exists() {
+        return Err(format!(
+            "pnpm install 成功但 dsh bin 缺失（包结构变化？）: {}",
+            bin.display()
+        ));
+    }
+    Ok(bin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "dshr-runtime-{label}-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn installed_version_reads_installed_package_json() {
+        let dir = temp_dir("version");
+        let package = dir.join("node_modules/@deepseek-ai/dsh");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{ "version": "0.1.5-alpha.1" }"#,
+        )
+        .unwrap();
+        assert_eq!(installed_version(&dir).as_deref(), Some("0.1.5-alpha.1"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn write_manifest_pins_requested_version() {
+        let dir = temp_dir("manifest");
+        write_manifest(&dir, "0.1.5-alpha.1").unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            manifest
+                .get("dependencies")
+                .and_then(|value| value.get("@deepseek-ai/dsh"))
+                .and_then(serde_json::Value::as_str),
+            Some("0.1.5-alpha.1")
+        );
+        assert!(dir.join("pnpm-workspace.yaml").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

@@ -51,8 +51,6 @@ pub struct EpochHeader {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adapter_defaults: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,
 }
 
@@ -66,6 +64,8 @@ pub struct RequestContextData {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt_update: Option<String>,
 }
 
 #[cfg(test)]

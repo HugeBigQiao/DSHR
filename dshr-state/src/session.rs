@@ -27,7 +27,10 @@ pub async fn run_full_round(
         ],
         current_dir: workspace.to_string_lossy().into_owned(),
         env: vec![
-            ("DEEPSEEK_API_KEY".to_string(), config.api_key.clone()),
+            (
+                "DEEPSEEK_API_KEY".to_string(),
+                config.api_key.clone().expect("Real 模式需要 API key"),
+            ),
             (
                 "DSH_HOME".to_string(),
                 workspace

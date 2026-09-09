@@ -1,8 +1,9 @@
-# DSH Rust SDK — 设计文档（v5，单一信息源）
+# DSH Rust SDK — 设计文档（v6，单一信息源）
 
 > 官方参考仓库：`D:\dsh\deepseek-harness`（源码是唯一权威，本文是施工蓝图 + 决策记录）。
 > v4（2026-09）：在三层骨架（SDK + state + 桌面端）上继续——**SDK 主线已完成，UI 层在开发**。
-> v5（2026-09-02）：协议大同步至 0.1.2-alpha.5（§6.15）；配置页 Zed 化（§12.16）；§11 数据罗盘 / 统计域 / 数据管道草案。
+> v6（2026-09-10）：协议同步至 deepseek-harness `0.1.5-alpha.1`（54 种已知事件）；runtime 版本校验/升级；API key 迁 `data/secrets.json`；v3 `assistant/message.stream` 统计。
+> v5（2026-09-02）：协议大同步至 0.1.5-alpha.1（§6.15）；配置页 Zed 化（§12.16）；§11 数据罗盘 / 统计域 / 数据管道草案。
 > 官方 TS 客户端 `@deepseek-ai/dsh-sdk-client` 与 Python SDK 是 design twin。
 
 ## 1. 定位（一句话）
@@ -77,7 +78,7 @@ dshr/
 │       ├── content_block.rs  # 内容块根 ← llm/types.ts 的 ContentBlockMap
 │       ├── content_block/    #   contentblock.rs / fallback.rs（未知块兜底）
 │       ├── session_event.rs  # SessionEvent 信封 + 判别枚举 + turn_step() ← core/session/types.ts
-│       ├── session_event/    # 事件 data 按事件族拆（51 种结构化 + Unknown 兜底，alpha.5 全集）
+│       ├── session_event/    # 事件 data 按事件族拆（54 种结构化 + Unknown 兜底，alpha.5 全集）
 │       ├── llm.rs            # TokenUsage/FinishReason/StreamChunk/LlmFailure ← llm/types.ts
 │       ├── notifications.rs  # 通知侧 wire 类型 + Kind 分发 ← types.ts 的 NotificationMap
 │       └── subagent.rs       # SubagentStopReason ← subagent/types.ts
@@ -192,8 +193,8 @@ App::update ── Message 分发：
 1. **定位 = Rust SDK 主线**（2026-09-01）：协议 + 客户端是核心资产；官方 UI 面是 web 组件生态，
    原生重写不划算（详见 §7 事实）；SDK 直接产品化。
 2. **runtime = `dsh --profile sdk`，锁版本**：npm `@deepseek-ai/dsh` 的 `latest` 是 0.1.1-rc.2
-   （无 sdk profile），必须显式 `@deepseek-ai/dsh@0.1.2-alpha.5`。2026-09-02 起锁 alpha.5
-   （此前锁 alpha.3）：官方 npm dist-tag `alpha` 已指向 0.1.2-alpha.5，而 0.1.2-alpha.3 → alpha.5
+   （无 sdk profile），必须显式 `@deepseek-ai/dsh@0.1.5-alpha.1`。2026-09-02 起锁 alpha.5
+   （此前锁 alpha.3）：官方 npm dist-tag `alpha` 已指向 0.1.5-alpha.1，而 0.1.2-alpha.3 → alpha.5
    的 wire 无破坏性变化（事件信封/判别 tag/字段名均兼容，见 §6.15），协议按官方 master 同步。
    旧侧车包（jsonrpc-demo / agent-spine-demo）已从官方仓库移除（commit 244de7c18a）。
 3. **DSH_HOME 独立**：spawn 时给 runtime 单独 DSH_HOME（如 `<管理目录>/home`），不碰用户 `~/.dsh`；
@@ -201,7 +202,7 @@ App::update ── Message 分发：
 4. **结构化范围 = 够用即可**：现有 48 个变体保留为"尽力而为的类型化视图"（`known()` 兜底，
    字段漂移自动降级 Unknown）；**不再追官方新增事件**——新事件一律 Unknown lossless，只有
    API/消费方真需要时才加变体。官方自己要求读端宽容未知（known-event-types.ts 注释）。
-   **（2026-09-02 用户决定做协议大同步后此条不再适用：官方 known-event-types.ts 全集 51 种
+   **（2026-09-02 用户决定做协议大同步后此条不再适用：官方 known-event-types.ts 全集 54 种
    已全部结构化，见 §6.15；§4-2 的 known()/Unknown 兜底仍保留。）**
 5. **发布策略 = 独立 crate + 生态目录**（awesome-dsh-plugin / dshget / market catalog）；
    官方树内收编等协议 1.0 稳定后（参照 python/ 进树先例）。**用户决定：发布等 SDK 全做完 + 测试完再说。**
@@ -239,11 +240,11 @@ App::update ── Message 分发：
     三个图标（横线/方框/叉），视觉统一。canvas 依赖 `lyon_path`（离线构建需先在线拉一次）。
 14. **state 冻结先搭 UI**（用户决定，2026-09）：dshr-state 与 SDK 链路已验证（M2.5），UI 阶段
     bridge 用占位实现（本地回显），UI 骨架完成后再和 state/SDK 对着写真实桥。commit 暂缓。
-15. **协议大同步 0.1.2-alpha.3 → 0.1.2-alpha.5**（用户决定，2026-09-02）：把协议层整体同步到
-    官方 master（= 0.1.2-alpha.5，官方 npm dist-tag `alpha` 亦指该版本）。判定：wire 无破坏性
+15. **协议大同步 0.1.2-alpha.3 → 0.1.5-alpha.1**（用户决定，2026-09-02）：把协议层整体同步到
+    官方 master（= 0.1.5-alpha.1，官方 npm dist-tag `alpha` 亦指该版本）。判定：wire 无破坏性
     变化（信封/判别 tag/字段名不变，只增不改）。同步内容：① 此前 Unknown 的 3 个事件类型化——
     `model/selection`、`session-log-deepseek/delivery-accepted`、`subagent/model-selection-policy`
-    （官方 known-event-types.ts 全集 51 种至此全部结构化 + Unknown 兜底）；② MessageSource
+    （官方 known-event-types.ts 全集 54 种至此全部结构化 + Unknown 兜底）；② MessageSource
     扩展 kind 结构化（goal/user-rpc/webhook/skill-catalog/skill-invocation/agent-instructions/
     session-reference/agent-message/subagent-settled/team-message，base 的 model 补
     provider/model/replayState）；③ SUBAGENT_DESCRIPTOR_VERSION 2 → 3（+agentReasoningEffort）；
@@ -307,7 +308,7 @@ App::update ── Message 分发：
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M0 dsh-sdk-protocol | 全部类型 + fallback + 帧层 | 完成（v4 大同步 0.1.2-alpha.5，51 事件全集结构化，见 §6.15） |
+| M0 dsh-sdk-protocol | 全部类型 + fallback + 帧层 | 完成（v4 大同步 0.1.5-alpha.1，54 事件全集结构化，见 §6.15） |
 | M1 dsh-sdk-client | HarnessClient + spawn + dispose + smoke | **完成** |
 | M2 API 对齐 | run / 订阅 / 会话树 / 图片 | **完成**（§8 全绿；剩发布） |
 | M2.5 dshr-state 重建 | 配置/记录/runtime/全链路（真实 runtime 跑通） | **完成**（真实验证：init + 2 轮 prompt，记录 232 条 dsh + 11 条 app） |
@@ -351,9 +352,9 @@ App::update ── Message 分发：
 **不建 events 全量表**：wire-logs JSONL 已是 lossless 源，重放即查询（§9.5 转接原则同源）；
 避免双写与体积。按 (session,type) 扫描走 WireLog 重放，确有热点再加窄表。
 
-### 11.3 统计域（可统计全集——**除 chunk**）
+### 11.3 统计域（可统计全集——**含 v3 stream 摘要，不保留逐 chunk**）
 
-`assistant/chunk` 每 token 级、量大且无聚合价值：**不入库不聚合**，只在会话流式渲染期做内存态。
+v3 起 `assistant/chunk` 已移除；`assistant/message.stream` / `assistant/attempt.stream` 记录紧凑流。dshr 展开后只保留统计摘要（chunks / 首 token 延迟 / 时长 / text/reasoning 字符数），**不保留逐 chunk 内容**，避免快照重复克隆。
 
 其余按层级全统计（落库 = §11.2 事实表；跨层聚合 = read 层函数，不入库）：
 
@@ -399,3 +400,6 @@ engine 落地（2026-09）：常驻会话中台在 `dshr-state::engine`，UI 只
 17. **数据罗盘 = data/ 收口 + dshr.db 只装自己（2026-09-02，草案）**：恢复 v3 的表设计骨架但**不建 events 重复表**（wire-logs 即 lossless 源）；chunk 不入库不聚合；统计域按 §11.3 分层全集设计，除 chunk 外无遗漏项（漏项在实施时补）。
 18. **engine 下沉：常驻会话中台进 dshr-state（2026-09，架构对齐 DESIGN v3 §9.5 / v4 M3.6 意图）**：s3 曾把常驻 worker（Machine/RealBridge，dshr-ui worker.rs/real.rs）放在 UI 旁并让 UI 直接 import dsh-sdk-client，旁路 state 层。现整体下沉为 `dshr-state::engine`（判定/装配/事件循环/fold→快照 + 落库 + WireLog 全在 state 侧），dshr-ui 只经 bridge 搬运命令/事件，不再直接依赖 dsh-sdk-client/dsh-sdk-protocol；原 worker/real 文件废弃待删。
 
+19. **协议同步 0.1.5-alpha.1 + runtime 版本校验 + secrets + stream 摘要（2026-09-10，用户决定）**：
+    协议层对齐 deepseek-harness `0.1.5-alpha.1` 的 54 种已知事件（新增 `system/message`、`assistant/attempt`、`tool/ptc-dispatch*`、`feedback/message-*`，移除 `assistant/chunk`、`tool/code-dispatch*`）；`ContentBlock` 补 `file`。
+    `runtime::ensure` 改为读取已安装 `@deepseek-ai/dsh/package.json` 版本，不匹配时重写 manifest 并 `pnpm install --force`；API key 迁到 `data/secrets.json`（Unix 0600），空 key 时设置页/状态栏警告并回退 Fake；v3 `AssistantStreamRecord` 提供 `expand()`，fold 只保留统计摘要，不保留逐 chunk。

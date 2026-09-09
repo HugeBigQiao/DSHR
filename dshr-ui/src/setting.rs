@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use iced::widget::{Space, button, column, container, row, scrollable, text, text_input};
 use iced::{Background, Element, Length};
 
+use dshr_state::secrets;
+
 use crate::app::App;
 use crate::theme;
 
@@ -59,14 +61,10 @@ impl SettingPane {
 
     fn load(&mut self) {
         let path = Self::config_path();
+        let workspace = path.parent().unwrap_or_else(|| Path::new("."));
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(v) => {
-                    self.api_key = v
-                        .get("api-key")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
                     self.provider = v
                         .get("provider")
                         .and_then(serde_json::Value::as_str)
@@ -80,9 +78,14 @@ impl SettingPane {
                     self.dsh_version = v
                         .get("dsh-version")
                         .and_then(serde_json::Value::as_str)
-                        .unwrap_or("0.1.2-alpha.5")
+                        .unwrap_or("0.1.5-alpha.1")
                         .to_string();
-                    self.note = format!("已加载 {}", path.display());
+                    self.api_key = secrets::load_api_key(workspace).unwrap_or_default();
+                    self.note = if self.api_key.trim().is_empty() {
+                        "未配置 API key：Real 模式会回退 Fake，请填写并保存。".to_string()
+                    } else {
+                        format!("已加载 {}", path.display())
+                    };
                 }
                 Err(e) => self.note = format!("解析失败: {e}"),
             },
@@ -91,17 +94,34 @@ impl SettingPane {
     }
 
     fn save(&mut self) {
-        let v = serde_json::json!({
-            "api-key": self.api_key,
+        let path = Self::config_path();
+        let workspace = path.parent().unwrap_or_else(|| Path::new("."));
+        let value = serde_json::json!({
             "provider": self.provider,
             "model": self.model,
             "dsh-version": self.dsh_version,
         });
-        let path = Self::config_path();
-        match std::fs::write(&path, serde_json::to_string_pretty(&v).expect("序列化")) {
-            Ok(()) => self.note = format!("已保存 {}", path.display()),
-            Err(e) => self.note = format!("保存失败: {e}"),
+        if let Err(error) = std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&value).expect("序列化 config.json"),
+        ) {
+            self.note = format!("保存失败: {error}");
+            return;
         }
+        if let Err(error) = secrets::save_api_key(workspace, &self.api_key) {
+            self.note = format!("保存 API key 失败: {error}");
+            return;
+        }
+        self.note = if self.api_key.trim().is_empty() {
+            "已保存；API key 为空，Real 模式将回退 Fake".to_string()
+        } else {
+            format!("已保存 {}", path.display())
+        };
+    }
+
+    /// API key 是否为空（用于启动提示/设置页警告）。
+    pub fn api_key_missing(&self) -> bool {
+        self.api_key.trim().is_empty()
     }
 
     /// 处理配置页消息（ThemeToggle 由 App 消费）。
@@ -200,7 +220,13 @@ impl SettingPane {
             self.section_content(app),
             Space::new().height(Length::Fill),
             row![
-                text(&self.note).size(app.fs(11)).color(p.label_tertiary),
+                text(&self.note)
+                    .size(app.fs(11))
+                    .color(if self.api_key_missing() {
+                        p.error
+                    } else {
+                        p.label_tertiary
+                    }),
                 Space::new().width(Length::Fill),
                 button(text("保存").size(app.fs(13)))
                     .on_press(Message::Save)
@@ -240,23 +266,33 @@ impl SettingPane {
             "runtime" => column![
                 group_caption(
                     "dsh 运行时",
-                    "npm dist-tag：alpha = 0.1.2-alpha.5；latest（0.1.1-rc.2）无 sdk profile，必须显式锁 alpha.x。",
+                    "npm dist-tag：alpha = 0.1.5-alpha.1；latest（0.1.1-rc.2）无 sdk profile，必须显式锁 alpha.x。",
                     p,
                     app,
                 ),
                 field("dsh-version", &self.dsh_version, Message::DshVersion, app),
             ]
             .spacing(14),
-            "api" => column![
-                group_caption(
-                    "DeepSeek API",
-                    "仅存本地 config.json（罗盘落地后拆到 data/secrets.json，见 DESIGN §11）。",
-                    p,
-                    app,
-                ),
-                field("api-key", &self.api_key, Message::ApiKey, app),
-            ]
-            .spacing(14),
+            "api" => {
+                let mut content = column![
+                    group_caption(
+                        "DeepSeek API",
+                        "仅存本地 data/secrets.json（Unix 0600；不再写 config.json）。",
+                        p,
+                        app,
+                    ),
+                    secret_field("api-key", &self.api_key, Message::ApiKey, app),
+                ]
+                .spacing(14);
+                if self.api_key_missing() {
+                    content = content.push(
+                        text("API key 为空：Real 模式会回退 Fake；请填写并保存。")
+                            .size(app.fs(11))
+                            .color(p.error),
+                    );
+                }
+                content
+            }
             _ => column![
                 group_caption(
                     "外观",
@@ -315,6 +351,30 @@ fn field<'a>(
             .color(p.label_secondary)
             .width(Length::Fixed(120.0)),
         text_input(label, value)
+            .on_input(on_input)
+            .padding([6, 10])
+            .style(theme::text_field(p))
+            .width(Length::Fill),
+    ]
+    .spacing(10)
+    .into()
+}
+
+/// 密钥输入行：同 `field`，但遮蔽显示。
+fn secret_field<'a>(
+    label: &'a str,
+    value: &'a str,
+    on_input: fn(String) -> Message,
+    app: &'a App,
+) -> Element<'a, Message> {
+    let p = app.palette();
+    row![
+        text(label)
+            .size(app.fs(13))
+            .color(p.label_secondary)
+            .width(Length::Fixed(120.0)),
+        text_input(label, value)
+            .secure(true)
             .on_input(on_input)
             .padding([6, 10])
             .style(theme::text_field(p))

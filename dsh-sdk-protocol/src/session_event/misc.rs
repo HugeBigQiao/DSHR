@@ -41,3 +41,44 @@ pub enum TodoItemStatus {
 pub struct FeedbackRecordData {
     pub text: String,
 }
+
+/// `feedback/message-put` 的 data：对一条助手消息写入或替换反馈。
+/// 官方：packages/feedback/message-feedback/src/types.ts 的 MessageFeedbackPut
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackMessagePutData {
+    pub session_id: String,
+    pub item: FeedbackMessageItem,
+}
+
+/// `feedback/message-delete` 的 data：删除一条助手消息的反馈。
+/// 官方：packages/feedback/message-feedback/src/types.ts 的 MessageFeedbackDelete
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackMessageDeleteData {
+    pub session_id: String,
+    pub message_id: String,
+}
+
+/// 消息反馈的完整当前值。
+/// 官方：packages/feedback/message-feedback/src/types.ts 的 MessageFeedbackItem
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackMessageItem {
+    pub message_id: String,
+    pub rating: FeedbackRating,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub version: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// 反馈评级。
+/// 官方：packages/feedback/message-feedback/src/types.ts 的 MessageFeedbackRating
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeedbackRating {
+    Positive,
+    Negative,
+}

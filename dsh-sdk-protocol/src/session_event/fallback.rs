@@ -1,14 +1,14 @@
 //! `SessionEvent` 的 fallback：手写 `Deserialize`。
 //!
 //! 官方协议是 merge-extensible（插件可注册新事件、版本会继续涨），Rust 枚举
-//! 是封闭集合，所以反序列化走"通用信封 → 按 type 分发"：官方 0.1.2-alpha.5 的
-//! 51 种已知事件（known-event-types.ts 全集）→ 类型化变体；未知（如插件自注册
+//! 是封闭集合，所以反序列化走"通用信封 → 按 type 分发"：官方 0.1.5-alpha.1 的
+//! 54 种已知事件（known-event-types.ts 全集）→ 类型化变体；未知（如插件自注册
 //! 事件/更新版新增）→ `Unknown`（全字段 lossless 保留）。
 //! v3 起：已知类型 data 解析失败也降级 `Unknown`（lossless），不整体报错——
 //! 官方发版漂移（字段改名/枚举新增）时类型化视图失效但不丢事件、不中断解析。
 //! v4（2026-09-02 大同步）：3 个此前 Unknown 的事件已结构化（model/selection、
 //! session-log-deepseek/delivery-accepted、subagent/model-selection-policy），
-//! 51 种已知事件全部有类型化变体，Unknown 只剩真正的未知兜底。
+//! 54 种已知事件全部有类型化变体，Unknown 只剩真正的未知兜底。
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 
@@ -63,7 +63,7 @@ impl<'de> Deserialize<'de> for SessionEvent {
         // 手写反序列化的核心分发：
         // 接收：任意事件 JSON。
         // 处理：先解通用信封（type/seq/time/data + 可选扩展字段），再按 type 字符串分发——
-        //       已知 51 种 → known() 尽力解析（失败降级 Unknown）；
+        //       已知 54 种 → known() 尽力解析（失败降级 Unknown）；
         //       未知 → 全字段原样保留进 Unknown（lossless，插件/新版扩展事件靠它兜住）。
         // 生成：类型化的 SessionEvent。
         let raw = RawEvent::deserialize(d)?;
@@ -93,11 +93,14 @@ impl<'de> Deserialize<'de> for SessionEvent {
             "user/message" => known(&raw, &raw.data, seq, time, |data| {
                 SessionEvent::UserMessage { seq, time, data }
             }),
-            "assistant/chunk" => known(&raw, &raw.data, seq, time, |data| {
-                SessionEvent::AssistantChunk { seq, time, data }
+            "system/message" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::SystemMessage { seq, time, data }
             }),
             "assistant/message" => known(&raw, &raw.data, seq, time, |data| {
                 SessionEvent::AssistantMessage { seq, time, data }
+            }),
+            "assistant/attempt" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::AssistantAttempt { seq, time, data }
             }),
             "tool/call" => known(&raw, &raw.data, seq, time, |data| SessionEvent::ToolCall {
                 seq,
@@ -159,6 +162,12 @@ impl<'de> Deserialize<'de> for SessionEvent {
             }),
             "feedback/record" => known(&raw, &raw.data, seq, time, |data| {
                 SessionEvent::FeedbackRecord { seq, time, data }
+            }),
+            "feedback/message-put" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::FeedbackMessagePut { seq, time, data }
+            }),
+            "feedback/message-delete" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::FeedbackMessageDelete { seq, time, data }
             }),
             "goal/change" => known(&raw, &raw.data, seq, time, |data| {
                 SessionEvent::GoalChange { seq, time, data }
@@ -223,11 +232,11 @@ impl<'de> Deserialize<'de> for SessionEvent {
             "tool-workflow/agent-end" => known(&raw, &raw.data, seq, time, |data| {
                 SessionEvent::ToolWorkflowAgentEnd { seq, time, data }
             }),
-            "tool/code-dispatch-start" => known(&raw, &raw.data, seq, time, |data| {
-                SessionEvent::ToolCodeDispatchStart { seq, time, data }
+            "tool/ptc-dispatch-start" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ToolPtcDispatchStart { seq, time, data }
             }),
-            "tool/code-dispatch" => known(&raw, &raw.data, seq, time, |data| {
-                SessionEvent::ToolCodeDispatch { seq, time, data }
+            "tool/ptc-dispatch" => known(&raw, &raw.data, seq, time, |data| {
+                SessionEvent::ToolPtcDispatch { seq, time, data }
             }),
             "web/deepseek-search-llm-request" => known(&raw, &raw.data, seq, time, |data| {
                 SessionEvent::WebDeepSeekSearchLlmRequest { seq, time, data }

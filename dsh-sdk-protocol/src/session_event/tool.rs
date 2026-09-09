@@ -1,7 +1,7 @@
 //! 工具事件族。
 //!
 //! 对应官方 `SessionEventMap` 中 `tool/call`、`tool/result` 两组
-//! 以及 code-mode 的 `tool/code-dispatch`、`tool/code-dispatch-start`
+//! 以及 PTC mode 的 `tool/ptc-dispatch`、`tool/ptc-dispatch-start`
 //! （`tool-workflow/*` 等扩展在工作流文件，由 fallback 兜住）。
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,7 @@ use crate::session_event::message::Message;
 
 /// `tool/call` 的 data：模型请求调用一个工具。
 /// 官方：packages/core/session/src/types.ts 的 SessionEventMap['tool/call']
-/// 用在模型发起工具调用的事件（监管面板命令视图的数据源）。
+/// 用在模型发起工具调用的事件（监督面板命令视图的数据源）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallData {
@@ -49,17 +49,16 @@ pub struct ToolResultError {
     pub code: String,
 }
 
-/// `tool/code-dispatch-start` 的 data：code-mode 子调用开始执行。
-/// 官方：packages/core/tools/src/types.ts 的 CodeDispatchStartEventData
-/// 用在子派发事件（调度器真正开始执行时追加，非提交时；UI 按 subCallId 配对实时运行态）。
+/// `tool/ptc-dispatch-start` 的 data：PTC mode 子调用开始执行。
+/// 官方：packages/core/tools/src/types.ts 的 PtcDispatchStartEventData
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeDispatchStartData {
+pub struct PtcDispatchStartData {
     /// 最外层 run_code 的 call id。
     pub root_call_id: String,
     /// 父 run_code 的 call id。
     pub parent_call_id: String,
-    /// 确定性 id：`<parent>:code:<n>`，按提交顺序编号。
+    /// 确定性 id：`<parent>:ptc:<n>`，按提交顺序编号。
     pub sub_call_id: String,
     /// 子工具名。
     pub name: String,
@@ -67,17 +66,16 @@ pub struct CodeDispatchStartData {
     pub arguments: serde_json::Value,
 }
 
-/// `tool/code-dispatch` 的 data：code-mode 子调用的结算。
-/// 官方：packages/core/tools/src/types.ts 的 CodeDispatchEventData
-/// 用在子派发结束事件（与 code-dispatch-start 按 subCallId 配对，abort 也算 isError）。
+/// `tool/ptc-dispatch` 的 data：PTC mode 子调用的结算。
+/// 官方：packages/core/tools/src/types.ts 的 PtcDispatchEventData
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CodeDispatchData {
+pub struct PtcDispatchData {
     /// 最外层 run_code 的 call id。
     pub root_call_id: String,
     /// 父 run_code 的 call id。
     pub parent_call_id: String,
-    /// 与 code-dispatch-start 配对的确定性 id。
+    /// 与 ptc-dispatch-start 配对的确定性 id。
     pub sub_call_id: String,
     /// 子工具名。
     pub name: String,

@@ -15,6 +15,7 @@ pub mod engine;
 pub mod fold;
 pub mod record;
 pub mod runtime;
+pub mod secrets;
 pub mod session;
 pub mod snapshot;
 pub mod store;

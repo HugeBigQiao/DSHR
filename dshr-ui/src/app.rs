@@ -84,7 +84,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        Self {
+        let mut app = Self {
             page: Page::Task,
             dark: true,
             font_size: 14,
@@ -98,7 +98,12 @@ impl App {
             pending_start: false,
             window_id: None,
             setting: setting::SettingPane::new(),
+        };
+        if app.setting.api_key_missing() {
+            app.data.chat.status_line =
+                "API key 未配置：Real 模式会回退 Fake；请到配置页填写 API key。".to_string();
         }
+        app
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {

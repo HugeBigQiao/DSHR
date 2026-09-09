@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use dshr_state::config;
-use dshr_state::record::{data_dir, Recorder};
+use dshr_state::record::{Recorder, data_dir};
 use dshr_state::runtime;
 use dshr_state::session;
 
@@ -85,7 +85,10 @@ fn summarize(log_path: &Path) {
     for (m, c) in &notif_counts {
         println!("  {m} × {c}");
     }
-    println!("== session.event 事件类型（共 {} 种）==", event_counts.len());
+    println!(
+        "== session.event 事件类型（共 {} 种）==",
+        event_counts.len()
+    );
     for (t, c) in &event_counts {
         println!("  {t} × {c}");
     }
@@ -122,7 +125,8 @@ async fn main() {
     );
     // node 环境检查 → dsh 本体（workspace/dsh，运行时下载）。
     runtime::ensure_node().expect("node 环境检查失败");
-    let dsh_bin = runtime::ensure(&root.join("dsh"), &cfg.dsh_version);
+    let dsh_bin =
+        runtime::ensure(&root.join("dsh"), &cfg.dsh_version).expect("准备 dsh runtime 失败");
     recorder.app("runtime.ready", &serde_json::json!({ "bin": dsh_bin }));
 
     let responses = session::run_full_round(&cfg, &root, &dsh_bin, &recorder).await;

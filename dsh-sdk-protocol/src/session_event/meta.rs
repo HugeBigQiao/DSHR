@@ -15,8 +15,9 @@ impl SessionEvent {
             StepStart { .. } => "step/start",
             StepEnd { .. } => "step/end",
             UserMessage { .. } => "user/message",
-            AssistantChunk { .. } => "assistant/chunk",
+            SystemMessage { .. } => "system/message",
             AssistantMessage { .. } => "assistant/message",
+            AssistantAttempt { .. } => "assistant/attempt",
             ToolCall { .. } => "tool/call",
             ToolResult { .. } => "tool/result",
             TodoWrite { .. } => "todo/write",
@@ -36,6 +37,8 @@ impl SessionEvent {
             CompactionPrune { .. } => "compaction/prune",
             CompactionSummary { .. } => "compaction/summary",
             FeedbackRecord { .. } => "feedback/record",
+            FeedbackMessagePut { .. } => "feedback/message-put",
+            FeedbackMessageDelete { .. } => "feedback/message-delete",
             GoalChange { .. } => "goal/change",
             HookInvoked { .. } => "hook/invoked",
             HookResult { .. } => "hook/result",
@@ -55,8 +58,8 @@ impl SessionEvent {
             ToolWorkflowRunEnd { .. } => "tool-workflow/run-end",
             ToolWorkflowAgentStart { .. } => "tool-workflow/agent-start",
             ToolWorkflowAgentEnd { .. } => "tool-workflow/agent-end",
-            ToolCodeDispatchStart { .. } => "tool/code-dispatch-start",
-            ToolCodeDispatch { .. } => "tool/code-dispatch",
+            ToolPtcDispatchStart { .. } => "tool/ptc-dispatch-start",
+            ToolPtcDispatch { .. } => "tool/ptc-dispatch",
             WebDeepSeekSearchLlmRequest { .. } => "web/deepseek-search-llm-request",
             ModelSelection { .. } => "model/selection",
             SessionLogDeepseekDeliveryAccepted { .. } => "session-log-deepseek/delivery-accepted",
@@ -77,8 +80,9 @@ impl SessionEvent {
             | StepStart { time, .. }
             | StepEnd { time, .. }
             | UserMessage { time, .. }
-            | AssistantChunk { time, .. }
+            | SystemMessage { time, .. }
             | AssistantMessage { time, .. }
+            | AssistantAttempt { time, .. }
             | ToolCall { time, .. }
             | ToolResult { time, .. }
             | TodoWrite { time, .. }
@@ -98,6 +102,8 @@ impl SessionEvent {
             | CompactionPrune { time, .. }
             | CompactionSummary { time, .. }
             | FeedbackRecord { time, .. }
+            | FeedbackMessagePut { time, .. }
+            | FeedbackMessageDelete { time, .. }
             | GoalChange { time, .. }
             | HookInvoked { time, .. }
             | HookResult { time, .. }
@@ -117,8 +123,8 @@ impl SessionEvent {
             | ToolWorkflowRunEnd { time, .. }
             | ToolWorkflowAgentStart { time, .. }
             | ToolWorkflowAgentEnd { time, .. }
-            | ToolCodeDispatchStart { time, .. }
-            | ToolCodeDispatch { time, .. }
+            | ToolPtcDispatchStart { time, .. }
+            | ToolPtcDispatch { time, .. }
             | WebDeepSeekSearchLlmRequest { time, .. }
             | ModelSelection { time, .. }
             | SessionLogDeepseekDeliveryAccepted { time, .. }
@@ -136,8 +142,9 @@ impl SessionEvent {
             | StepStart { seq, .. }
             | StepEnd { seq, .. }
             | UserMessage { seq, .. }
-            | AssistantChunk { seq, .. }
+            | SystemMessage { seq, .. }
             | AssistantMessage { seq, .. }
+            | AssistantAttempt { seq, .. }
             | ToolCall { seq, .. }
             | ToolResult { seq, .. }
             | TodoWrite { seq, .. }
@@ -157,6 +164,8 @@ impl SessionEvent {
             | CompactionPrune { seq, .. }
             | CompactionSummary { seq, .. }
             | FeedbackRecord { seq, .. }
+            | FeedbackMessagePut { seq, .. }
+            | FeedbackMessageDelete { seq, .. }
             | GoalChange { seq, .. }
             | HookInvoked { seq, .. }
             | HookResult { seq, .. }
@@ -176,8 +185,8 @@ impl SessionEvent {
             | ToolWorkflowRunEnd { seq, .. }
             | ToolWorkflowAgentStart { seq, .. }
             | ToolWorkflowAgentEnd { seq, .. }
-            | ToolCodeDispatchStart { seq, .. }
-            | ToolCodeDispatch { seq, .. }
+            | ToolPtcDispatchStart { seq, .. }
+            | ToolPtcDispatch { seq, .. }
             | WebDeepSeekSearchLlmRequest { seq, .. }
             | ModelSelection { seq, .. }
             | SessionLogDeepseekDeliveryAccepted { seq, .. }
@@ -197,8 +206,9 @@ impl SessionEvent {
             TurnEnd { data, .. } => (Some(data.turn), None),
             StepStart { data, .. } => (Some(data.turn), Some(data.step)),
             StepEnd { data, .. } => (Some(data.turn), Some(data.step)),
-            AssistantChunk { data, .. } => (Some(data.turn), Some(data.step)),
+            SystemMessage { data, .. } => (Some(data.turn), Some(data.step)),
             AssistantMessage { data, .. } => (Some(data.turn), Some(data.step)),
+            AssistantAttempt { data, .. } => (Some(data.turn), Some(data.step)),
             ToolCall { data, .. } => (Some(data.turn), Some(data.step)),
             ToolResult { data, .. } => (Some(data.turn), Some(data.step)),
             HookInvoked { data, .. } => (Some(data.turn), None),

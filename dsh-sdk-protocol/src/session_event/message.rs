@@ -1,7 +1,7 @@
 //! 消息类事件族。
 //!
-//! 对应官方 `SessionEventMap` 中 `user/message`、`assistant/chunk`、
-//! `assistant/message` 三组；消息本体类型来自官方 `packages/llm/llm/src/message.ts`。
+//! 对应官方 `SessionEventMap` 中 `user/message`、`system/message`、
+//! `assistant/message`、`assistant/attempt`；消息本体类型来自官方 `packages/llm/llm/src/message.ts`。
 use serde::{Deserialize, Serialize};
 
 use crate::content_block::ContentBlock;
@@ -37,27 +37,97 @@ pub struct Message {
 /// 用在用户消息进入会话的事件。
 pub type UserMessageData = Message;
 
-/// `assistant/chunk` 的 data：原始流式块（token 级回放保真）。
-/// 官方：packages/core/session/src/types.ts 的 SessionEventMap['assistant/chunk']
-/// 用在助手流式输出的每个 chunk 事件（聊天流式渲染的数据源）。
+/// `system/message` 的 data：渲染后的系统提示消息。
+/// 官方：packages/core/session/src/types.ts 的 SessionEventMap['system/message']
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AssistantChunkData {
+pub struct SystemMessageData {
     pub turn: u64,
     pub step: u64,
-    pub chunk: crate::llm::StreamChunk,
+    pub message: Message,
 }
 
-/// `assistant/message` 的 data：组装好的助手消息 + 该步 token 账目。
+/// `assistant/message` 的 data：组装好的助手消息 + 该步 token 账目 + 精确流记录。
 /// 官方：packages/core/session/src/types.ts 的 SessionEventMap['assistant/message']
-/// 用在助手完整消息事件（监管面板 token 明细的数据源）。
+/// 新日志必带 `stream`；这里用 Option 兼容旧日志缺字段。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssistantMessageData {
     pub turn: u64,
     pub step: u64,
     pub message: Message,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<Vec<crate::llm::AssistantStreamRecord>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::llm::TokenUsage>,
-    /// turn 中途取消时，本条是已交付的文本/reasoning 前缀（wire: `interrupted: true`）。
+    /// turn 中途取消时，本消息是已交付的文本/reasoning 前缀（wire: `interrupted: true`）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interrupted: Option<bool>,
+}
+
+/// `assistant/attempt` 的 data：一次没有提交 surface 消息的模型尝试。
+/// 官方：packages/core/session/src/types.ts 的 SessionEventMap['assistant/attempt']
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantAttemptData {
+    pub turn: u64,
+    pub step: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<Vec<crate::llm::AssistantStreamRecord>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::session_event::SessionEvent;
+
+    #[test]
+    fn system_message_event_roundtrips() {
+        let wire = json!({
+            "type": "system/message",
+            "seq": 1,
+            "time": 10,
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "message": {
+                    "id": "sys-1",
+                    "role": "system",
+                    "content": [{"type": "text", "text": "prompt"}],
+                    "source": {"kind": "plugin", "plugin": "system-prompt"}
+                }
+            }
+        });
+        let event: SessionEvent =
+            serde_json::from_value(wire.clone()).expect("system/message should parse");
+        match &event {
+            SessionEvent::SystemMessage { data, .. } => {
+                assert_eq!(data.turn, 1);
+                assert_eq!(data.step, 1);
+            }
+            other => panic!("expected SystemMessage, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
+    }
+
+    #[test]
+    fn assistant_attempt_event_roundtrips() {
+        let wire = json!({
+            "type": "assistant/attempt",
+            "seq": 2,
+            "time": 20,
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "stream": []
+            }
+        });
+        let event: SessionEvent =
+            serde_json::from_value(wire.clone()).expect("assistant/attempt should parse");
+        match &event {
+            SessionEvent::AssistantAttempt { data, .. } => {
+                assert_eq!(data.stream.as_ref().map(Vec::len), Some(0));
+            }
+            other => panic!("expected AssistantAttempt, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
+    }
 }

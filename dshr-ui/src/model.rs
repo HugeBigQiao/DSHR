@@ -8,7 +8,7 @@
 //! 替换式刷新（engine 每事件发一次快照，消息行/统计在映射处重建；增量传输留后续）。
 
 use dshr_state::engine::{SessionStatus, TokenUsage};
-use dshr_state::snapshot::{MsgItem, SessionSnapshot, ToolItem};
+use dshr_state::snapshot::{MsgItem, SessionSnapshot, StreamSummary, ToolItem};
 
 // 消息种类直接复用 state 快照的种类（User/Assistant/Reasoning/Tool/Notice 一一对应）。
 pub use dshr_state::snapshot::MsgKind;
@@ -95,6 +95,8 @@ pub struct MsgView {
     /// （DESIGN 会话消息流阶段），先保留字段。
     #[allow(dead_code)]
     pub usage: Option<TokenCounts>,
+    /// v3 assistant stream 摘要（无流记录 = None）。
+    pub stream: Option<StreamSummary>,
     /// Tool 行的卡片内容（快照 call↔result 配对后的 ToolItem：name/call_id/duration/
     /// is_error/result/diffs）。
     pub tool: Option<ToolItem>,
@@ -111,6 +113,7 @@ impl MsgView {
             text: item.text.clone(),
             reasoning: item.reasoning.clone(),
             usage: item.usage.as_ref().map(TokenCounts::from_usage),
+            stream: item.stream,
             tool: item.tool.clone(),
             time_label: hhmm_utc(item.time),
             seq: item.seq,
@@ -309,6 +312,7 @@ mod tests {
             text: "第一问".to_string(),
             reasoning: None,
             usage: None,
+            stream: None,
             tool: None,
             // 2024-01-02T03:04:05Z
             time: 1704164645000,
@@ -339,6 +343,7 @@ mod tests {
                     text: String::new(),
                     reasoning: None,
                     usage: None,
+                    stream: None,
                     tool: Some(tool_item),
                     time: 1704164645000,
                     seq: 2,

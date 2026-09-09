@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 /// 官方：packages/core/session/src/types.ts 的 SessionEventMap['session/end-seed']
 /// 用在构造种子结束的事件（之前的 seq 均来自种子：resume/fork/replay）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionEndSeedData {}
+pub struct SessionEndSeedData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherited: Option<bool>,
+}
 
 /// `session-log-deepseek/delivery-accepted` 的 data：官方 DeepSeek 会话日志上传送达确认。
 /// 官方：packages/session/session-log-deepseek/src/types.ts 的 declare module（L54-63）
@@ -21,6 +24,9 @@ pub struct SessionEndSeedData {}
 pub struct DeliveryAcceptedData {
     /// 已接受投递携带的会话 id。
     pub session_id: String,
+    /// 已接受的 Session format generation；缺失表示 version 0。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_format_version: Option<u64>,
     /// 已接受请求包含的最后一条事件序号（官方 branded SessionSeq）。
     pub through_seq: u64,
 }
@@ -29,7 +35,6 @@ pub struct DeliveryAcceptedData {
 mod tests {
     use serde_json::json;
 
-    use super::*;
     use crate::session_event::SessionEvent;
 
     /// 官方形状的 delivery-accepted 事件可解析并 roundtrip。

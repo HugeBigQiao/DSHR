@@ -72,12 +72,12 @@ pub enum SessionEvent {
         time: u64,
         data: message::UserMessageData,
     },
-    /// 助手流式输出的一块。
-    #[serde(rename = "assistant/chunk")]
-    AssistantChunk {
+    /// 流程生成的 system 消息（在 model-visible surface 上）。
+    #[serde(rename = "system/message")]
+    SystemMessage {
         seq: u64,
         time: u64,
-        data: message::AssistantChunkData,
+        data: message::SystemMessageData,
     },
     /// 组装好的助手消息。
     #[serde(rename = "assistant/message")]
@@ -85,6 +85,13 @@ pub enum SessionEvent {
         seq: u64,
         time: u64,
         data: message::AssistantMessageData,
+    },
+    /// 没有写入 surface 的一次模型尝试（成功但无消息、失败、重试、取消等）。
+    #[serde(rename = "assistant/attempt")]
+    AssistantAttempt {
+        seq: u64,
+        time: u64,
+        data: message::AssistantAttemptData,
     },
     /// 模型发起一次工具调用。
     #[serde(rename = "tool/call")]
@@ -219,6 +226,20 @@ pub enum SessionEvent {
         time: u64,
         data: misc::FeedbackRecordData,
     },
+    /// 对某条助手消息写入/替换反馈。
+    #[serde(rename = "feedback/message-put")]
+    FeedbackMessagePut {
+        seq: u64,
+        time: u64,
+        data: misc::FeedbackMessagePutData,
+    },
+    /// 删除某条助手消息的反馈。
+    #[serde(rename = "feedback/message-delete")]
+    FeedbackMessageDelete {
+        seq: u64,
+        time: u64,
+        data: misc::FeedbackMessageDeleteData,
+    },
     /// 目标变更（快照 + 墓碑）。
     #[serde(rename = "goal/change")]
     GoalChange {
@@ -352,19 +373,19 @@ pub enum SessionEvent {
         time: u64,
         data: workflow::ToolWorkflowAgentEndData,
     },
-    /// code-mode 子调用开始执行。
-    #[serde(rename = "tool/code-dispatch-start")]
-    ToolCodeDispatchStart {
+    /// PTC mode 子调用开始执行。
+    #[serde(rename = "tool/ptc-dispatch-start")]
+    ToolPtcDispatchStart {
         seq: u64,
         time: u64,
-        data: tool::CodeDispatchStartData,
+        data: tool::PtcDispatchStartData,
     },
-    /// code-mode 子调用结算。
-    #[serde(rename = "tool/code-dispatch")]
-    ToolCodeDispatch {
+    /// PTC mode 子调用结算。
+    #[serde(rename = "tool/ptc-dispatch")]
+    ToolPtcDispatch {
         seq: u64,
         time: u64,
-        data: tool::CodeDispatchData,
+        data: tool::PtcDispatchData,
     },
     /// 辅助 web 搜索请求快照。
     #[serde(rename = "web/deepseek-search-llm-request")]
