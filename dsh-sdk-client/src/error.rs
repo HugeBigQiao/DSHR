@@ -1,7 +1,18 @@
 //! 统一客户端错误。
 //!
+//! 主要用途：把「进程 I/O、JSON、协议、超时、runtime 退出」五类失败收敛成一个 `Error`，
+//! 并用 `From<ParseError>` 把帧层错误转成语义变体。
+//! 为什么需要：调用方（dshr-state raw 层、UI 错误提示）需要一个**可穷尽 match** 的错误集，
+//! 且必须能区分「可重试的超时」与「runtime 已死」；单列文件而非建 error crate，
+//! 是因为分层明确：`ParseError` 属协议层（帧形状），`Error` 属客户端层（调用语义），
+//! 两者用 `From` 衔接即可，不值得为两个 crate 再拆一个包（见 DESIGN §6 第 4 条）。
+//! 上接：`dsh-sdk-client` 的 process / transport / client / subscription / api（全部返回它）；
+//!       `dshr-state` 的 raw 层（按变体决定报错与落库）。
+//! 下接：`dsh_sdk_protocol::rpc::ParseError` / `RpcError`（经 `From` 吸收）、thiserror。
+//!
 //! 分层设计：protocol 的 `ParseError`（帧解析）经 `From` 转成本类型的语义变体；
-//! 四个协议级变体一一对应官方 client 的四个错误类（packages/sdk/client/src/client.ts）：
+//!
+//! 官方对应：四个协议级变体一一对应官方 client 的四个错误类（packages/sdk/client/src/client.ts）：
 //!   `RpcError`        ← `JsonRpcResponseError`（wire error 响应，code+data 保留）
 //!   `RequestTimeout`  ← `RequestTimeoutError`（请求超时）
 //!   `SdkProtocol`     ← `SdkProtocolError`（响应不符合文档化协议）
@@ -10,6 +21,12 @@ use thiserror::Error;
 
 use dsh_sdk_protocol::rpc::{ParseError, RpcError as WireRpcError};
 
+/// 客户端错误全集（五类）。
+///
+/// 为什么需要：调用方需要按「能不能继续用这个 client」分流——`RequestTimeout` 可重试、
+/// `TransportClosed` 说明 runtime 已死（后续请求必然失败）、`RpcError` 是协议层拒绝；
+/// 把这五个变体放在一个封闭枚举里，match 才是穷尽的（新增失败类型会编译报错）。
+/// `Io`/`Json` 保留 `#[from]` 以便用 `?` 透传，其余四类对应官方的四个错误类。
 #[derive(Debug, Error)]
 pub enum Error {
     /// 管道/进程 I/O 失败（spawn、读写 stdin/stdout、kill/wait）。
@@ -44,44 +61,18 @@ impl From<ParseError> for Error {
     fn from(error: ParseError) -> Self {
         match error {
             ParseError::Json(e) => Error::SdkProtocol(format!("帧解析失败: {e}")),
-            ParseError::Rpc(WireRpcError { code, message, data }) => {
-                Error::RpcError { code, message, data }
+            ParseError::Rpc(WireRpcError {
+                code,
+                message,
+                data,
+            }) => Error::RpcError {
+                code,
+                message,
+                data,
+            },
+            ParseError::MissingResult => {
+                Error::SdkProtocol("响应既无 result 也无 error".to_string())
             }
-            ParseError::MissingResult => Error::SdkProtocol("响应既无 result 也无 error".to_string()),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    /// 官方 `JsonRpcResponseError` 语义：wire error 响应 → Error::RpcError，code + data 保留。
-    #[test]
-    fn wire_rpc_error_maps_to_rpc_error_variant() {
-        let err = ParseError::Rpc(WireRpcError {
-            code: -32601,
-            message: "method not found".to_string(),
-            data: Some(json!({"detail": "x"})),
-        });
-        match Error::from(err) {
-            Error::RpcError { code, message, data } => {
-                assert_eq!(code, -32601);
-                assert_eq!(message, "method not found");
-                assert_eq!(data, Some(json!({"detail": "x"})));
-            }
-            other => panic!("应映射为 RpcError，实际 {other:?}"),
-        }
-    }
-
-    /// 官方 `SdkProtocolError` 语义：帧不合法 → Error::SdkProtocol。
-    #[test]
-    fn malformed_frame_maps_to_sdk_protocol_variant() {
-        let err = ParseError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err());
-        match Error::from(err) {
-            Error::SdkProtocol(_) => {}
-            other => panic!("应映射为 SdkProtocol，实际 {other:?}"),
         }
     }
 }

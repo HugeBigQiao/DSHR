@@ -1,5 +1,15 @@
 //! 目标扩展事件族：`goal/change`。
-//! 官方：packages/goal/goal/src/domain.ts（类型在 packages/goal/goal/src/types.ts）。
+//!
+//! 主要用途：目标整值快照 + 墓碑（create/edit/pause/resume/complete/block/clear）的 data 类型。
+//! 为什么需要：目标状态是「会话为什么继续跑」的驱动事实，且**按 operation 判别**、
+//! 每次变更携带完整 post-mutation 快照（与增量事件不同），这套重放语义必须整体成族；
+//! 官方类型在 goal 包（领域 + 类型两个文件），单列文件便于对齐。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（目标面板）/ store（审计）。
+//! 下接：无（只依赖 serde；`kind: 'goal/change'` 字段按观察者语义忽略）。
+//!
+//! 官方对应：packages/goal/goal/src/domain.ts（类型在 packages/goal/goal/src/types.ts）
+//! 的 `SessionEventMap['goal/change']`。
 use serde::{Deserialize, Serialize};
 
 /// `goal/change` 的 data：目标整值快照 + 墓碑（kind 恒为 "goal/change"，按 operation 判别）。

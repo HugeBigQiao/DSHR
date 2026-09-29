@@ -1,5 +1,16 @@
 //! hook 扩展事件族：`hook/invoked`、`hook/result`。
-//! 官方：packages/hooks/hook-protocol/src/events.ts。
+//!
+//! 主要用途：一次 hook 调用开始与结算（按 handlerId 配对）两组事件的 data 类型，
+//! 含方言（claude-code / codex）与决策字符串。
+//! 为什么需要：hook 是「外部脚本插手 agent 行为」的审计链，其决策（approve/deny/…）
+//! 与退出码/耗时是排查「为什么这个工具被拦」的唯一证据；官方把它放在独立的
+//! hook-protocol 包，且原生插件不写这组事件——这一反直觉点需要文件级说明。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（hook 时间线）。
+//! 下接：无（只依赖 serde）。
+//!
+//! 官方对应：packages/hooks/hook-protocol/src/events.ts 的
+//! `SessionEventMap['hook/invoked']` 与 `SessionEventMap['hook/result']`。
 use serde::{Deserialize, Serialize};
 
 /// `hook/invoked` 的 data：一次 hook 调用开始。

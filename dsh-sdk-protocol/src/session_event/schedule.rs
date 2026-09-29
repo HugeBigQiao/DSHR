@@ -1,5 +1,15 @@
 //! 调度扩展事件族：`schedule/change`。
-//! 官方：packages/schedule/schedule/src/types.ts。
+//!
+//! 主要用途：调度创建/删除/派发三组变更（按 operation 判别，带 version）与调度记录
+//! （after/at/every 三种 kind）的 data 类型。
+//! 为什么需要：官方把它设计成**版本化变更流而非快照**，重放时要校验完整的 session-local
+//! 转换序列；这条语义与 goal（快照）相反，必须写在明处，否则容易被当成「取最后一条即可」。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（定时任务列表）。
+//! 下接：无（只依赖 serde）。
+//!
+//! 官方对应：packages/schedule/schedule/src/types.ts 的
+//! `SessionEventMap['schedule/change']`。
 use serde::{Deserialize, Serialize};
 
 /// `schedule/change` 的 data：调度变更（版本化变更流而非快照，按 operation 判别）。

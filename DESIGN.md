@@ -1,405 +1,791 @@
-# DSH Rust SDK — 设计文档（v6，单一信息源）
+# dshr 设计文档（单一真源）
 
-> 官方参考仓库：`D:\dsh\deepseek-harness`（源码是唯一权威，本文是施工蓝图 + 决策记录）。
-> v4（2026-09）：在三层骨架（SDK + state + 桌面端）上继续——**SDK 主线已完成，UI 层在开发**。
-> v6（2026-09-10）：协议同步至 deepseek-harness `0.1.5-alpha.1`（54 种已知事件）；runtime 版本校验/升级；API key 迁 `data/secrets.json`；v3 `assistant/message.stream` 统计。
-> v5（2026-09-02）：协议大同步至 0.1.5-alpha.1（§6.15）；配置页 Zed 化（§12.16）；§11 数据罗盘 / 统计域 / 数据管道草案。
-> 官方 TS 客户端 `@deepseek-ai/dsh-sdk-client` 与 Python SDK 是 design twin。
+> 本文件是 dshr 的**整体设计单一真源**：当前架构、边界、决策与操作约束。
+> 「为什么变成这样、踩过什么坑、下一步想做什么」记录在 [`AI-LOG.md`](AI-LOG.md)。
+>
+> 官方参考仓库：`D:\dsh\deepseek-harness`（**源码是唯一权威**，本文是施工蓝图 + 决策记录；描述不准时以官方源码为准）。
+> 官方 TS 客户端 `@deepseek-ai/dsh-sdk-client` 与 Python SDK 是 design twin（同 runtime 同协议）。
+>
+> 本轮（2026-09-28）：协议同步至官方 `0.1.7-rc.2`（59 种已知事件）；state 层定为
+> **raw / engine / fold** 三层；`fold.rs`(1193 行) 与 `store.rs`(844 行) 完成拆分。
 
-## 1. 定位（一句话）
+## 目录
 
-dshr = **Rust 三层**：
+1. [定位](#1-定位)
+2. [架构总览](#2-架构总览)
+3. [state 分层（dshr-state）](#3-state-分层dshr-state)
+4. [wire 协议面](#4-wire-协议面)
+5. [仓库布局](#5-仓库布局)
+6. [协议 port 关键决策](#6-协议-port-关键决策)
+7. [调用链](#7-调用链)
+8. [数据罗盘 / 统计域 / 数据管道](#8-数据罗盘--统计域--数据管道)
+9. [决策记录](#9-决策记录)
+10. [关键事实与坑](#10-关键事实与坑)
+11. [代码规范](#11-代码规范)
+12. [待办与里程碑](#12-待办与里程碑)
+13. [风险](#13-风险)
 
-1. **dsh-sdk-protocol / dsh-sdk-client**：在任意 Rust 程序里驱动一个 DeepSeek Harness runtime
-   子进程（`dsh --profile sdk`），stdio JSON-RPC；纯客户端库，无 UI，宿主需要 node（跑 dsh CLI）。
-2. **dshr-state**：桌面端 state 层——配置 / 全程记录（WireLog）/ runtime 获取 / 会话全链路。
-3. **dshr-ui**：桌面端薄壳 UI（Iced 0.14，无边框 Zed 式布局），页面设计**全部参考官方
-   deepseek-harness**（token 对齐 `ui-theme/src/styles/design-platform.css` 的 `--dsw-alias-*`）。
+---
+
+## 1. 定位
+
+dshr = **Rust 三层 + 一个桌面端**：
+
+| 层 | crate | 职责 |
+|---|---|---|
+| ① 协议 | `dsh-sdk-protocol` | wire 类型 + 帧层（纯逻辑，仅 serde） |
+| ② 客户端 | `dsh-sdk-client` | 驱动**一个** runtime 子进程（`dsh --profile sdk`），stdio JSON-RPC |
+| ③ 状态 | `dshr-state` | 桌面端 state：配置 / 记录 / runtime 获取 / **数据处理与落库** |
+| ④ 界面 | `dshr-ui` | 桌面端薄壳（Iced 0.14，无边框 Zed 式布局） |
+
+**核心判断**：官方给模型注册了 `cordis_inspect_*` / `cordis_define` / `cordis_run` 等自扩展工具
+（`packages/extensions/tool-cordis`），模型能在会话内自写自装插件。所以桌面端只需
+「固定基础方案」的薄壳 UI（凭据/模型/策略落文件，UI 极简）；薄壳场景下原生（Iced）劣势消失、
+优势凸显（快/小/无 WebView）。
+
+**宿主依赖**：需要 node（跑 dsh CLI）。官方 exe 打包在 Windows 是 non-goal。
+
+---
 
 ## 2. 架构总览
 
 ```
-┌───────────────────────────── 桌面端薄壳（dshr-ui，Iced）─────────────────────────────┐
-│ 顶栏（Zed：页面标签 + — □ ✕ + 拖动区）                                                │
-│  ┌─侧边栏─┐  ┌─对话区─┐  ┌─详情─┐   底部图标栏（任务页）                                │
-│  └────────┘  └────────┘  └──────┘                                                     │
-└───────────────────────────┬───────────────────────────────────────────────────────────┘
-                           ▼ 事件/命令（bridge 薄层）
-                  ┌──────────────────────┐
-                  │ dshr-state（state 层）│  配置(config.json) / 记录(WireLog) / runtime 获取
-                  └──────────────────────┘
+┌──────────────────── dshr-ui（Iced，纯页面）────────────────────┐
+│ 顶栏（Zed：页面标签 + — □ ✕ + 拖动区）                          │
+│  ┌─侧边栏─┐  ┌─对话区─┐  ┌─详情─┐  底部图标栏（任务页）         │
+└──────────────────────────┬─────────────────────────────────────┘
+                           ▼ Cmd / ▲ Event（bridge 薄层：只搬运）
+┌──────────────────── dshr-state ────────────────────────────────┐
+│  engine   核心数据处理：多 runtime / 多会话路由、脏检测、落库节流  │
+│    │  ▲ wire 级事件（带 runtime/session 标）                    │
+│  raw      与 SDK 沟通：进程生死 + wire 协议 + 订阅 + WireLog      │
+│  fold     纯投影：会话事件流 → 内存快照（被 engine 调用）          │
+│  store    sqlite 加工库                                         │
+└──────────────────────────┬─────────────────────────────────────┘
+                           ▼ SessionDriver trait（3 请求 / 4 通知 + stderr + 退出）
+                   dsh-sdk-client：client(总装) + transport(管道) + process(生死)
                            ▼ spawn + stdio JSON-RPC
-                  ┌──────────────────────┐
-                  │ dsh-sdk-client        │  client(总装) + transport(管道) + process(生死)
-                  └──────────────────────┘
-                           ▼
-                  dsh --profile sdk（官方 runtime，node 子进程）
+                   dsh --profile sdk（官方 runtime，node 子进程）
 ```
 
 **UI 设计原则**：页面参考官方 `packages/client/*`（AppFrame 三栏、SettingsRoot 遮罩面板、
 SidebarRoot、消息气泡/工具卡片、StatsLine、composer dock）；窗口/顶栏布局参考 Zed
 （标签与窗口控制同排、无边框 + 拖动区、底部图标栏）。
 
-### 2.1 wire 方法面（7 种消息，双向）
+---
+
+## 3. state 分层（dshr-state）
+
+### 3.1 三层职责与命名
+
+| 层 | 名字 | 职责 | 什么会改它 |
+|---|---|---|---|
+| 与 SDK 沟通 | **raw** | 进程生死、wire 协议、订阅、WireLog；把「一个有状态的子进程」收敛成可替换接口 | 官方发版 |
+| 核心数据处理 | **engine** | 多 runtime/会话的路由、脏检测、快照缓存、落库节流 | 产品需求 |
+| UI 数据查询 | **fold** | 纯投影：事件 → UI 可消费的数据（**保持无副作用**） | UI 形态 |
+
+依赖方向**单向**：`ui → engine → raw → dsh-sdk-client`。
+`fold` 与 `snapshot` 是**被 engine 调用的纯数据层**（不在这条链上）：
+`engine → fold → snapshot::SessionSnapshot`。
+
+### 3.2 为什么不合并 engine 与 raw
+
+1. **变化频率不同**：raw 跟官方发版走；engine 跟产品走。合并后每次官方发版都要动数据管道代码。
+2. **可测性会塌**：raw 碰进程（`ChildStdin` / `oneshot` / `Arc<Mutex<Child>>`），
+   合并后纯数据管道无法用假 driver 单测（不起进程）。
+3. **与多 runtime 冲突**：engine 需要 runtime 注册表 + 跨会话聚合；raw 需要每 runtime 独立的
+   进程生命周期。放一个结构里就是又一个 God object。
+
+### 3.3 raw 不是「薄层」，是端口
+
+raw 内是**真逻辑**，不是转发：帧分类与 id 配对、请求超时、`TransportClosed`（带 exit code +
+stderr 尾部）、dispose 阶梯（EOF → [SIGTERM] → SIGKILL，Windows 跳过 SIGTERM）、
+WireLog 双向全量记录、官方 4 个错误类映射。
+
+**它的价值 = 把有状态、有副作用、难测的世界收敛成可替换接口**，让上层只处理数据。
+判断一个层是否该存在，看它**约束了什么**，不看行数。
+
+### 3.4 fold 变薄是对的
+
+fold 的职责就是投影；薄才能纯，纯才能用「事件 JSON → 快照相等」断言。
+它是唯一能被单测完全覆盖的层——协议漂移/字段改名/新事件全靠它兜住而不炸 UI。
+
+### 3.5 SessionDriver trait（粒度：runtime 级）
+
+**状态：已落地（M2）**。实现在 `dshr-state/src/raw/driver.rs`（接口）与
+`raw/client_driver.rs`（`HarnessClient` 适配）。
+
+**粒度依据**：`Transport` 是**每 runtime 一条**（持有单个 `wire_log: Option<Arc<WireLog>>`、
+一个广播发送端、一个 stdin）。所以 trait 实例 = 一个 runtime，`session_id` 作为方法参数传入。
+
+完整暴露面 = **三进四出 + 两类进程信号**（后两类**不走协议通知**，必须显式暴露）：
+
+```rust
+/// 一个 runtime 的驱动面。实现方持有进程 + 管道；调用方只处理数据。
+#[async_trait]
+pub trait SessionDriver: Send {
+    /// 进程级握手（provider/model 路由）。
+    async fn initialize(&mut self, params: &InitializeParams) -> Result<InitializeResult, Error>;
+
+    /// 发一条用户消息（sessionId 是参数 → 同一 runtime 可多会话）。
+    async fn prompt(&mut self, params: &SessionPromptParams) -> Result<SessionPromptResult, Error>;
+
+    /// 取通知流（4 种通知的原始帧；解析在 protocol::notifications::parse）。
+    fn events(&mut self) -> broadcast::Receiver<Notification>;
+
+    /// 进程 stderr 流（第二类信号；store 有 runtime_logs 表等它落库）。
+    fn stderr(&mut self) -> mpsc::UnboundedReceiver<String>;
+
+    /// 进程退出信号（第三类信号：exit code + stderr 尾部 + 是否异常）。
+    fn exit_signal(&mut self) -> ExitSignal;
+
+    /// 收尾：协议 shutdown → dispose 阶梯。消费型（官方 close 语义）。
+    async fn shutdown(self: Box<Self>) -> Result<(), Error>;
+}
+```
+
+**为什么这两类必须在 trait 里**：引擎要做「runtime 死了要报错 + 落库审计」，
+只靠四通知拿不到——现在只能从 `Error::TransportClosed` **间接**看出退出，
+而 stderr 流整个被丢弃（`take_stderr()` 无人调用）。
+
+### 3.6 落盘完整性原则
+
+**尽可能多地暴露并落盘数据**。已定的取舍：
+
+- **逐 chunk 不落盘**（空间代价不可接受），改为**按会话记录完整 chunk 序列**：
+  一条 `assistant/message.stream` 保留该次消息的全部 `AssistantStreamRecord`，
+  而不是每个 chunk 一行数据库记录。
+- **`stderr` 必须落盘**（`store/runtime_logs` 表已建，等 engine 消费）。
+- **进程退出必须落盘**（exit code + stderr 尾部）为审计事实。
+
+### 3.7 已知的结构错配（多 runtime/会话的待做项）
+
+`EngineCmd` 是**运行时级**（无 session 标识），`EngineEvent::Snapshot` 是**会话级**（带 session_id）
+——两者无法对上，`last_sent: Option<SessionSnapshot>` 的单会话去重就是这个假设的产物。
+
+**待做**：`runtime_id → session_id → 会话态` 两级结构；`Bridge::feed` 现在**过滤阶段直接丢弃**
+非当前会话的通知，多会话化时要改成路由。
+
+---
+
+## 4. wire 协议面
+
+### 4.1 方法面（7 种消息，双向）
 
 **请求侧（client → server，3 个）：**
 
-| method | params 类型 | result 类型 |
+| method | params | result |
 |---|---|---|
-| `initialize` | `InitializeParams` | `InitializeResult` |
-| `session/prompt` | `SessionPromptParams` | `SessionPromptResult` |
+| `initialize` | `InitializeParams`（cwd / provider / model / reasoningEffort? / maxTokens?） | `InitializeResult`（`serverInfo{name,version}`） |
+| `session/prompt` | `SessionPromptParams`（**sessionId** / contentBlocks[]） | `SessionPromptResult`（messageId 入队回执） |
 | `shutdown` | 无（wire 上 `{}`） | 空对象 `{}` |
 
 **通知侧（server → client，4 个）：**
 
-| method | 类型 | payload 形状 |
-|---|---|---|
-| `session.event` | `SessionEventNotification` | `{ sessionId, event: SessionEvent }` |
-| `session.status` | `SessionStatusNotification` | `{ sessionId, status: 'idle' \| 'running' }` |
-| `subagent.started` | `SubagentStartedNotification` | `{ parentSessionId, childSessionId }` |
-| `subagent.finished` | `SubagentFinishedNotification` | `{ provider, agentId, parent, child, status, stopReason, lastAssistantMessage? }` |
+| method | payload |
+|---|---|
+| `session.event` | `{ sessionId, event: SessionEvent }` |
+| `session.status` | `{ sessionId, status: 'idle' \| 'running' }` |
+| `subagent.started` | `{ parentSessionId, childSessionId }` |
+| `subagent.finished` | `{ provider, agentId, parentSessionId, childSessionId, status, stopReason, lastAssistantMessage? }` |
 
 **方向判定规则**：请求带 `id`（配对响应）；通知无 `id` 有 `method`。`rpc::classify` 按此区分。
 
-## 3. 仓库布局（逐文件标注官方对应）
+**协议面本身不含「runtime」概念**——多 runtime 是产品能力，由 engine 持注册表实现。
+一个 runtime 内可并存多会话（官方 `session/prompt` 的 `sessionId` 注释：unknown id lazily
+creates the agent+session pair）。
+
+### 4.2 会话事件全集（59 种）
+
+事件全集来自官方 `packages/core/session/src/known-event-types.ts`（**上游生成物，勿手改**）。
+dshr 侧 59 种全部结构化，另有 `Unknown` 兜底（lossless）。
+
+**维护纪律**：
+
+- 新增/变更事件类型时，**三处同步**：判别枚举变体 + `session_event/fallback.rs` 的手写 `Deserialize`
+  分发 + `session_event/meta.rs` 的 `as_str/time/seq/turn_step` 四方法。漏任一处要么解析不到、
+  要么穷尽匹配编译失败。
+- **机器化对账（两处，别互相替代）**：
+  ① `node scripts/compare-session-events.mjs` —— **对官方真源**（需要 deepseek-harness 克隆），
+  退出码 1 = 有差异；当前结果 **59 = 59，零差异**。
+  ② `cargo test -p dsh-sdk-protocol --test event_catalog` —— **对锁定的官方快照**
+ （`dsh-sdk-protocol/tests/fixtures/known-event-types.txt`），只 clone 了 dshr 也能跑。
+  **不要手工比对**（规模已到必须脚本化）。
+- 同步前先用上游标签做权威 diff（见 AI-LOG §5）。
+
+### 4.3 内容块（7 种）
+
+官方 `packages/llm/llm/src/types.ts` 的 `ContentBlockMap`：
+`text` / `reasoning` / `image` / `file` / `tool-call` / `tool-addition` / `tool-removal`。
+
+dshr 额外保留 `ToolResult`（官方 0.1.7-rc.2 已移除该块，保留变体**仅作旧日志读取兼容**）
+与 `Unknown`（插件扩展面 lossless 兜底）。
+
+### 4.4 消息来源（`MessageSource`）
+
+一条消息「是谁生产的」由 `Message.source`（`{kind:…}` 对象）声明。
+官方是 **merge-extensible**：每个生产者在自己的包里 `declare module '@deepseek-ai/dsh-llm'`
+注册自己的 kind（**没有**统一的 catch-all `plugin` kind）。
+
+**kind 的权威判据（0.1.7-rc.2 起）**：官方**没有**汇总式的基座 `MessageSourceMap` 了
+（0.1.2 时代那份在 `packages/llm/llm/src/message.ts`，现在拆到各包的
+`declare module '@deepseek-ai/dsh-llm'`）。核对顺序：
+① **真实帧**（`data/wire-logs` 里的 `*.message.source`）→
+② **合并声明**（`dsh/node_modules/@deepseek-ai/dsh-llm/lib/typert.host.js` 里嵌了完整 `.d.ts`）→
+③ 迁移表（`packages/session/session-format-v3-to-v4/src/sources.ts`）。
+
+**当前状态（2026-09-29）**：已建模 **20 种** kind。
+user / model / tool / system-prompt / runtime-context / plugin / goal / webhook / skill-catalog /
+skill-invocation / agent-instructions / session-reference / agent-message / subagent-settled /
+team-message / **plan-mode / model-selection / user-approval / ptc-mode / compact-checkpoint**（后 5 个为本次补齐）。
+
+**未建模的 kind 会让含它的整条消息降级 `Unknown`**：丢的是结构化视图（见下），
+**wire log 的原始 JSONL 无损**。界面目前看不出差别（fold 只折 `role=user 且 source.kind=user`
+的行，`system/message`、`developer/message` 也不折），代价落在「s3 按来源分类渲染」与统计域上。
+
+**降级不再静默**（本次新增）：
+`SessionEvent::Unknown` 现在带 `degraded: bool` 区分两种情况——「**已知类型但 data 解析失败**」
+（协议漂移，`degraded = true`）与「类型本身就未知」（插件自注册，merge-extensible 的**预期**行为）。
+engine 对前者写一条 app 轨迹 `{"cat":"app","kind":"event.degraded","data":{sessionId,eventType,seq}}`，
+用 `scripts/scan-message-sources.mjs` 可汇总。**这是本节的护栏 ①**。
+
+**护栏与其分工**：
+
+| 手段 | 守什么 | 边界 |
+|---|---|---|
+| `tests/frame_shape.rs::real_message_sources_are_modelled` | fixture 样本里已知的 kind 不被改坏 | 看不见样本外的新 kind |
+| engine 的 `event.degraded` 轨迹 | 运行时真实发生的漂移 | 事后可见（不是拦截） |
+| `scripts/scan-message-sources.mjs` | **发现**新 kind 与字段漂移（扫已安装 runtime + 合并声明 + 日志） | 需在装了 runtime 的机器上跑 |
+
+**不在本 profile 依赖闭包里的**（`time-context` / `tmux-context` / `coordinator` /
+`subagent-report` / `tool-cordis` / `cordis-host-runner` / `schedule` / `hooks-*` /
+`tool-registry` …）**不会出现**，不必建模；`scan-message-sources.mjs` 会按「是否在依赖闭包内」
+自动区分「真实缺口」与「理论存在」。
+
+**已建模但与官方声明不一致的风险**：无（脚本的逐字段比对当前全绿）。
+
+---
+
+## 5. 仓库布局
 
 ```
 dshr/
 ├── Cargo.toml                # workspace（protocol + client + state + ui）
+├── README.md                 # 项目门面（三层简介 + 快速开始 + data/ 说明）
+├── DESIGN.md                 # 本文件：整体设计单一真源
+├── AI-LOG.md                 # 交流记录 / 踩坑 / 设想 / 决策简史（过程）
 ├── dsh/                      # dsh 本体（运行时下载，发布不带，gitignore）
-├── config.json               # 本地配置（api-key/provider/model/dsh-version，gitignore）
-├── data/                     # 状态数据（gitignore）：dsh-home / wire-logs / .pnpm-store
-├── dsh-sdk-protocol/         # ① 协议：类型 + 帧层（纯逻辑，仅 serde）
+├── config.json               # 本地配置（provider/model/dsh-version，gitignore）
+├── data/                     # 状态数据（gitignore）：dsh-home / wire-logs / .pnpm-store / secrets.json
+│
+├── dsh-sdk-protocol/         # ① 协议层（纯逻辑，仅 serde）
 │   └── src/
 │       ├── lib.rs            # pub mod 汇总
 │       ├── rpc.rs            # 帧层 ← 官方 transport.ts
-│       ├── requests.rs       # 请求侧 wire 类型根 ← types.ts 的 HarnessSdkRequestMap
-│       ├── requests/         #   initialize.rs / session.rs / shutdown.rs ← types.ts
-│       ├── content_block.rs  # 内容块根 ← llm/types.ts 的 ContentBlockMap
-│       ├── content_block/    #   contentblock.rs / fallback.rs（未知块兜底）
-│       ├── session_event.rs  # SessionEvent 信封 + 判别枚举 + turn_step() ← core/session/types.ts
-│       ├── session_event/    # 事件 data 按事件族拆（54 种结构化 + Unknown 兜底，alpha.5 全集）
-│       ├── llm.rs            # TokenUsage/FinishReason/StreamChunk/LlmFailure ← llm/types.ts
-│       ├── notifications.rs  # 通知侧 wire 类型 + Kind 分发 ← types.ts 的 NotificationMap
+│       ├── requests.rs       # 请求侧 wire 类型根 ← HarnessSdkRequestMap
+│       ├── requests/         #   initialize / session / shutdown
+│       ├── content_block.rs  # 内容块根 ← ContentBlockMap
+│       ├── content_block/    #   contentblock（类型）/ fallback（未知块兜底）
+│       ├── session_event.rs  # SessionEvent 信封 + 判别枚举 + turn_step() ← SessionEventMap
+│       ├── session_event/    #   事件 data 按事件族拆（59 种 + Unknown 兜底）
+│       ├── llm.rs            # TokenUsage / FinishReason / StreamChunk / LlmFailure ← llm/types.ts
+│       ├── notifications.rs  # 通知侧 wire 类型 + Kind 分发 ← NotificationMap
 │       └── subagent.rs       # SubagentStopReason ← subagent/types.ts
+│
 ├── dsh-sdk-client/           # ② 客户端：管理单个 runtime 进程
 │   ├── src/
-│   │   ├── lib.rs            # crate 声明（≈ 官方 client.ts 的 HarnessClient）
-│   │   ├── error.rs          # 统一客户端错误（四类对应官方错误类，From 链吸收 ParseError）
+│   │   ├── lib.rs            # crate 声明
+│   │   ├── error.rs          # 统一错误（4 类对应官方错误类，From 链吸收 ParseError）
 │   │   ├── client.rs         # 总装师：HarnessClient 类型化方法 API
-│   │   ├── transport.rs      # 管道对话：读循环 + id 配对 + 事件广播（≈ transport.ts 的 I/O 半）
-│   │   ├── process.rs        # 进程生死：spawn/stderr/exit 监控/dispose 阶梯（≈ dispose.ts）
-│   │   ├── subscription.rs   # 事件订阅 + 会话树 scoping（≈ client.ts 的 subscribeSessionTree）
-│   │   └── api.rs            # run() receipt-to-idle（≈ api.ts 的 DeepSeekHarness.run）
-│   └── tests/                # 集成测试（fake runtime 进程，见 DESIGN §5.1）
-├── dshr-state/               # ③ state 层（桌面端地基）
+│   │   ├── transport.rs      # 管道对话：读循环 + id 配对 + 事件广播 + WireLog
+│   │   ├── process.rs        # 进程生死：spawn / stderr / exit 监控 / dispose 阶梯
+│   │   ├── subscription.rs   # 事件订阅 + 会话树 scoping（≈ subscribeSessionTree）
+│   │   └── api.rs            # run() receipt-to-idle（≈ DeepSeekHarness.run）
+│   └── tests/                # 集成测试（fake runtime 进程）
+│
+├── dshr-state/               # ③ 状态层（详见 dshr-state/README.md）
 │   ├── src/
-│   │   ├── lib.rs            # 模块声明
-│   │   ├── config.rs         # 配置加载（config.json：api-key/provider/model/dsh-version）
-│   │   ├── record.rs         # 全程记录（一个 JSONL：cat=dsh 细到 event / cat=app 分开）
-│   │   ├── runtime.rs        # runtime 获取（锁版本 pnpm install --ignore-scripts）
-│   │   ├── session.rs        # 全链路运行（full round：spawn → initialize → run → shutdown）
-│   │   └── main.rs           # 可执行入口（运行 + 汇总）
-│   └── Cargo.toml
-├── dshr-ui/                  # ④ 桌面端薄壳 UI（Iced 0.14）
-│   ├── src/
-│   │   ├── main.rs           # iced::application，无边框窗口（decorations:false）
-│   │   ├── app.rs            # 根状态机 + 消息分发 + 窗口控制（iced::window 动作）
-│   │   ├── nav.rs            # 顶栏：页面标签 + canvas 自绘 — □ ✕ + 拖动区（Zed 布局）
-│   │   ├── theme.rs          # 官方设计 token → Palette（深/浅两套）+ 控件样式
-│   │   ├── model.rs          # UI 数据快照（bridge 提供；state 接入后由真实桥更新）
-│   │   ├── bridge.rs         # 占位桥（state 冻结期间回显；接入 dshr-state 后换真实）
-│   │   ├── widgets/
-│   │   │   └── popover.rs    # 覆盖式菜单（自定义 advanced widget，官方下拉形态）
-│   │   ├── task.rs           # 任务页装配（侧边栏 + 对话 + 详情三区）
-│   │   ├── task/
-│   │   │   ├── sidebar.rs    # runtime/会话树 + ⋯ 覆盖菜单（Popover）
-│   │   │   ├── chat.rs       # 消息流 + StatsLine + composer（Enter 发送）
-│   │   │   └── details.rs    # 右侧详情占位
-│   │   ├── monitor.rs        # 监控页（占位）
-│   │   ├── setting.rs        # 配置页（左类别导航 + 右内容，官方 SettingsRoot 形态）
-│   │   └── statusbar.rs      # 底部图标栏（任务页专属）
-│   └── Cargo.toml            # iced features: tokio + advanced + canvas
-├── DESIGN.md                 # 本文档（单一信息源）
-├── README.md                 # 项目门面（三层简介 + 快速开始 + data/ 说明）
-├── Cargo.lock
-└── .gitignore                # 含 /dsh/、/config.json、/data/、/secrets.json
+│   │   ├── lib.rs            # 分层说明 + 模块清单
+│   │   ├── raw.rs  raw/      #   与 SDK 沟通（Runtime + mode + driver/client_driver）
+│   │   ├── engine.rs engine/ #   核心数据处理（M3 落地；当前为 raw 的再出口）
+│   │   ├── fold.rs fold/     #   纯投影（Folder + event / render / tests）
+│   │   ├── snapshot.rs       #   fold 的输出类型（UI 模型）
+│   │   ├── store.rs store/   #   sqlite 加工库（门面 + error/schema/convert/write/tests）
+│   │   ├── record.rs         #   WireLog 装载
+│   │   ├── runtime.rs        #   runtime 获取（锁版本 pnpm install --ignore-scripts）
+│   │   ├── config.rs         #   配置加载（config.json）
+│   │   ├── secrets.rs        #   API key（data/secrets.json，Unix 0600）
+│   │   ├── workspace.rs      #   工作区文件读写（仅限相对路径）
+│   │   ├── session.rs        #   ⚠️ 待删（M4）：与 raw 重复的全链路入口
+│   │   └── main.rs           #   可执行入口（全链路运行 + 记录汇总）
+│   └── README.md             # 本 crate 的组成结构与依赖关系
+│
+└── dshr-ui/                  # ④ 桌面端薄壳 UI（Iced 0.14）
+    ├── src/
+    │   ├── main.rs           # iced::application，无边框窗口（decorations: false）
+    │   ├── app.rs            # 根状态机 + 消息分发 + 窗口控制
+    │   ├── bridge.rs         # 总线：Cmd/Event 搬运 + iced 订阅装配
+    │   ├── nav.rs            # 顶栏：页面标签 + 自绘 — □ ✕ + 拖动区
+    │   ├── theme.rs          # 官方设计 token → Palette（深/浅）+ 控件样式
+    │   ├── model.rs          # UI 视图模型（由 snapshot 映射）
+    │   ├── dpi.rs            # DPI 一致性兜底（见决策 §9.16/§9.17）
+    │   ├── widgets.rs widgets/  # 自定义控件（Popover 覆盖式菜单）
+    │   ├── task.rs task/     #   任务页（sidebar / chat / details）
+    │   ├── files.rs files/   #   文件页（工作区树 + 代码编辑器）
+    │   ├── monitor.rs        # 监控页（占位）
+    │   ├── setting.rs        # 配置页（左类别导航 + 右内容）
+    │   └── statusbar.rs      # 底部图标栏
+    └── Cargo.toml            # iced features：默认 wgpu-renderer + code-editor
 ```
 
-## 4. 协议 port 关键决策
+**工作区级脚本**在 `D:\dsh\scripts\`（不在 dshr 内）：步骤索引见 `scripts/pipeline.json`。
+
+---
+
+## 6. 协议 port 关键决策
 
 1. **判别联合用 `#[serde(tag = "type")]`**：事件 wire 类型带斜杠（`turn/start`），每个变体显式
-   `#[serde(rename = "...")]`；data 结构体驼峰处 `camelCase`；嵌套联合（如 `FinishReason`）用 `tag = "kind"`。
-2. **merge-extensible 必须宽容**：信封 → 按 type 分发，未知进 `Unknown`（lossless 保留）；
-   字符串联合枚举加 `#[serde(other)] Unknown`（参照 `subagent.rs` 的 `SubagentStopReason`）。
-   **已实现（v3）**：`fallback.rs` 的 `known()` 助手——已知类型 data 解析失败也降级 `Unknown`
-   （lossless），不整体报错；这是 `reason: 'series'` 教训的通用解法，有回归测试。
+   `#[serde(rename = "...")]`；data 结构体驼峰处 `camelCase`；嵌套联合（如 `FinishReason`、`TurnEndReason`）
+   用 `tag = "kind"`。
+2. **merge-extensible 必须宽容**（两层兜底）：
+   - **事件级**：信封 → 按 type 分发，未知进 `Unknown`（lossless 保留）。
+   - **已知但漂移**：`fallback.rs` 的 `known()` 助手——已知类型 data 解析失败也降级 `Unknown`，
+     不整体报错。这是 `reason: 'series'` 事件的通用解法，有回归测试。
+   - **字符串联合枚举**加 `#[serde(other)]` 兜底（`TurnEndReason::Other`、`MessageRole::Other`）。
+   官方自己要求读端宽容未知（`known-event-types.ts` 注释）。
 3. **transport 划分**：帧逻辑（构造/判断/解析/信封）全在 `protocol/rpc.rs`（零依赖纯函数）；
    管道 I/O + 配对在 `client/transport.rs`。
 4. **错误分层**：`protocol::rpc::ParseError`（帧层）+ `client::Error`（thiserror，`From` 链吸收）——
    不建单独 error crate。
-5. **事件通道结构化**：通知以 `Notification { method, params: Value }` 出通道，消费方按 method 解析。
-6. **注释规范（强制）**：官方引用必须钉到**具体文件 + 类/方法/函数**（行号可加分），例如
-   `packages/core/agent-loop/src/agent.ts 的 Agent.buildRequest()`、`types.ts 的 InitializeParams.reasoningEffort`。
-7. **行数约束（强制）**：单文件平均 ≤350 行；超了拆文件。
-8. **测试惯例（v3 起）**：协议改动必须带回归测试（2026-09-01 项目才有第一个测试
-   `request_header_reason_series_parses`，此前零测试）。
+5. **事件通道结构化**：通知以 `Notification { method, params: Value }` 出通道，消费方按 method 解析
+   （`notifications::parse` → `Kind`）。
+6. **行数约束**：单文件平均 ≤350 行；超了拆文件（`fold`、`store` 已按此拆分）。
+7. **测试惯例**：协议改动**必须带回归测试**。⚠️ **全部测试已于 2026-09-29 清空**，正在按新布局重建——见 §12.4「测试策略」。
 
-## 5. 完整流程（fn 级调用链）
+---
+
+## 7. 调用链
+
+### 7.1 SDK 层（client + transport）
 
 ```
-consumer 程序
-│
-├─ HarnessClient::spawn(config)              [client/client.rs]
-│   ├─ RuntimeProcess::spawn(config)         [client/process.rs]
-│   │   └─ Command::new("node").args([dsh_bin, "--profile", "sdk"])...spawn()
-│   └─ Transport::start(stdin, stdout)       [client/transport.rs]
+consumer
+├─ HarnessClient::spawn(config)                      [client/client.rs]
+│   ├─ RuntimeProcess::spawn(config)                 [client/process.rs]
+│   │   └─ Command::new("node").args([dsh_bin, "--profile", "sdk"])…spawn()
+│   └─ Transport::start(stdin, stdout, status, wire_log)   [client/transport.rs]
 │       └─ tokio::spawn(读循环)：lines.next_line() → rpc::classify
-│            ├─ Response{id} → pending.remove(id) → tx.send(Ok(line))
-│            ├─ Notification{method, params} → events_tx.send(...)
-│            └─ EOF → 失败所有 pending（Error::RuntimeExited）
-│
-├─ client.initialize(&InitializeParams)      [client/client.rs]
-│   └─ transport.request("initialize", &body) → rpc::parse::<InitializeResult>
-│
-├─ client.prompt(&SessionPromptParams)       ← 同 initialize 路径，返回 messageId 入队回执
-│
-├─ 事件消费：
-│   client.events().recv() → Notification{method:"session.event", params}
-│   └─ notifications::parse → Kind（4 种之一；未知 method 返回 Ok(None)）
-│
-└─ client.shutdown()                         [client/client.rs]
-    ├─ transport.request("shutdown", "{}") → parse::<ShutdownResult>
-    └─ process.kill_and_wait()               （TODO：升级为官方 EOF→SIGTERM→SIGKILL 阶梯）
+│            ├─ Response{id}  → pending.remove(id) → tx.send(Ok(line))
+│            ├─ Notification → wire_log.record_recv → events_tx.send(...)
+│            └─ EOF → 失败所有 pending（Error::TransportClosed{exit_code, stderr_tail}）
+├─ client.initialize(&InitializeParams) → transport.request("initialize") → rpc::parse
+├─ client.prompt(&SessionPromptParams) → 同上，返回 messageId 入队回执
+├─ 事件消费：client.take_events() → Notification → notifications::parse → Kind（4 种之一）
+└─ client.shutdown() → 协议 shutdown → process.dispose(EOF→[SIGTERM]→SIGKILL)
 ```
 
-**一句话**：`client` 三行委托（序列化 → transport.request → rpc.parse），`transport` 管"写+配对"
+**一句话**：`client` 三行委托（序列化 → `transport.request` → `rpc.parse`），`transport` 管"写+配对"
 （读循环后台常驻），`process` 管生死，`rpc` 管帧形状。
 
-### 5.1 UI 层调用链（骨架阶段）
+### 7.2 state 层（目标形态）
 
 ```
-App::view ── nav(顶栏) + task/sidebar(树) + task/chat(对话) + statusbar
+UI ──EngineCmd──▶ engine ──SessionDriver──▶ raw ──▶ dsh --profile sdk
+UI ◀─EngineEvent── engine ◀──wire 级事件──── raw
+                     │
+                     ├─▶ fold::Folder ─▶ snapshot::SessionSnapshot（快照缓存，UI 按需读）
+                     └─▶ store::Store（落库：会话/turn/工具/文件/审计）
+```
+
+读取模型（M6 定的 **B 方案**）：engine 持快照缓存，事件只发轻量变更通知，UI 按需读快照
+（避免多会话下整份 clone 的开销）。
+
+### 7.3 UI 层
+
+```
+App::view   ── nav(顶栏) + task/sidebar(树) + task/chat(对话) + statusbar
 App::update ── Message 分发：
-  ├─ Window(cmd)  → iced::window::{minimize,maximize,close,drag}(window_id)
-  │                 （window_id 由 subscription 订阅 window::open_events 捕获，主窗口 Id::unique()）
-  ├─ Task(⋯ 菜单) → Popover（自定义 advanced widget，见 §6.11）
-  ├─ Task(Send)   → composer.text() → 占位桥本地回显（TODO：接 state → SDK）
-  └─ Task(Edit)   → composer.perform(action)（Edit::Enter 除外——转 Send，见 §6.12）
+  ├─ Window(cmd) → iced::window::{minimize,maximize,close,drag}(window_id)
+  ├─ Task(⋯ 菜单) → Popover（自定义 advanced widget）
+  ├─ Task(Send)   → cmd_tx.send(BridgeCmd::Prompt{..}) → engine → raw → runtime
+  └─ Task(Edit)   → composer.perform(action)（Edit::Enter 除外——转 Send）
 ```
 
-## 6. 决策记录
+---
 
-1. **定位 = Rust SDK 主线**（2026-09-01）：协议 + 客户端是核心资产；官方 UI 面是 web 组件生态，
-   原生重写不划算（详见 §7 事实）；SDK 直接产品化。
-2. **runtime = `dsh --profile sdk`，锁版本**：npm `@deepseek-ai/dsh` 的 `latest` 是 0.1.1-rc.2
-   （无 sdk profile），必须显式 `@deepseek-ai/dsh@0.1.5-alpha.1`。2026-09-02 起锁 alpha.5
-   （此前锁 alpha.3）：官方 npm dist-tag `alpha` 已指向 0.1.5-alpha.1，而 0.1.2-alpha.3 → alpha.5
-   的 wire 无破坏性变化（事件信封/判别 tag/字段名均兼容，见 §6.15），协议按官方 master 同步。
-   旧侧车包（jsonrpc-demo / agent-spine-demo）已从官方仓库移除（commit 244de7c18a）。
-3. **DSH_HOME 独立**：spawn 时给 runtime 单独 DSH_HOME（如 `<管理目录>/home`），不碰用户 `~/.dsh`；
-   工作区经 `DSH_CWD` env + `InitializeParams.cwd` 锁死。
-4. **结构化范围 = 够用即可**：现有 48 个变体保留为"尽力而为的类型化视图"（`known()` 兜底，
-   字段漂移自动降级 Unknown）；**不再追官方新增事件**——新事件一律 Unknown lossless，只有
-   API/消费方真需要时才加变体。官方自己要求读端宽容未知（known-event-types.ts 注释）。
-   **（2026-09-02 用户决定做协议大同步后此条不再适用：官方 known-event-types.ts 全集 54 种
-   已全部结构化，见 §6.15；§4-2 的 known()/Unknown 兜底仍保留。）**
-5. **发布策略 = 独立 crate + 生态目录**（awesome-dsh-plugin / dshget / market catalog）；
-   官方树内收编等协议 1.0 稳定后（参照 python/ 进树先例）。**用户决定：发布等 SDK 全做完 + 测试完再说。**
-6. **序列化兼容**：官方新增字段一律 `Option + skip_serializing_if`（wire 可选，缺省 = 旧行为）。
-7. **测试为硬约束**：协议改动无回归测试不合并（v3 起）。
-8. **模型自扩展是核心，UI 薄壳是正确形态**（2026-09-01）：官方给模型注册了
-   `cordis_inspect_list` / `cordis_inspect_self` / `cordis_define` / `cordis_run` / `cordis_stop` /
-   `cordis_remove` 工具（`packages/extensions/tool-cordis`），模型能在会话内自写自装插件。推论：
-   桌面端只需"固定基础方案"的薄壳 UI（凭据/模型/策略落文件，UI 极简）；薄壳场景下原生（Iced）
-   劣势消失、优势凸显（快/小/无 WebView）。**v4 落地**：UI 已成为开发主线（见 §10）。
-9. **runtime 获取落地（2026-09-01 实测定案）**：dsh 本体放 **`dshr/dsh/`**（与 data/ 平级，
-   发布不带，运行时检测/下载，删除可重下）；`data/` 只放状态（dsh-home、wire-logs、.pnpm-store）。
-   包管理器 **pnpm**：共享全局 store 去重 + `--ignore-scripts`
-   （实测 node-pty/koffi 的 tarball 自带预编译产物，跳过构建完全可用——免 node-gyp 工具链）
-   + `--config.minimumReleaseAge=0`（pnpm 供应链年龄策略默认拒绝刚发布的 alpha 包）。
-   node 检测（≥22.19，缺失报清晰错误；**自动安装 portable node 是下一步**）。
-10. **UI 页面设计全参考官方 deepseek-harness**（用户指令，2026-09）：旧版设计作废；布局参考
-    Zed（顶栏标签 + 窗口控制同排、侧边栏 runtime + 会话树、底部图标栏）。token 对齐官方
-    `packages/client/ui-theme/src/styles/design-platform.css` 的 `--dsw-alias-*`
-    （bg_base 21,21,23 / layer1-3 / label_primary 249,250,251 / accent deepseek-400 103,158,254 /
-    border rgba(255,255,255,0.06) / bubble 44,44,46）。**描述不准时以官方源码为准。**
-11. **覆盖式菜单自研（Popover，iced 无内置）**：`dshr-ui/src/widgets/popover.rs`，`features=["advanced"]`
-    自定义 `Widget::overlay`。三个硬教训（对照官方 `iced_widget/src/overlay/menu.rs`）：
-    - **viewport 必须传绝对坐标矩形 `layout.bounds()`**：传 `Rectangle::with_size(size)`（原点 0,0）
-      会让整个菜单被渲染器裁剪掉——"画了但看不见"（首版 bug，layout/draw 日志全对，视觉全无）；
-    - 锚点 = `layout.position() + translation`（视口绝对坐标，pick_list 同款）；
-    - 菜单定位在宿主右下、偏移 +8（曾 0 偏移导致菜单第一项「＋ 新建」压在 ⋯ 正下方，
-      点击 ⋯ 误触新建），右缘超出视口时左移钳制。
-12. **Enter 发送**：iced 0.14 `text_editor` 把 Enter 发布为 `Action::Edit(Edit::Enter)`，插入换行
-    是 App 收到 action 后 `content.perform()` 才执行的——`on_action` 里拦截它转 `Send`，不执行
-    perform 即不插入换行。**0.14 限制：`Edit::Enter` 不携带 shift 信息，Shift+Enter 也会发送**
-    （`Binding::from_key_press` 对 Enter 无条件返回 `Self::Enter`）；多行文本用中间换行。
-13. **窗口控制图标 canvas 自绘**：unicode 字符（— □ ✕）在不同字体 fallback 下大小不一
-    （U+25A1 在 Segoe UI 渲染偏小），用 `iced::widget::canvas`（feature "canvas"）自绘 14×14
-    三个图标（横线/方框/叉），视觉统一。canvas 依赖 `lyon_path`（离线构建需先在线拉一次）。
-14. **state 冻结先搭 UI**（用户决定，2026-09）：dshr-state 与 SDK 链路已验证（M2.5），UI 阶段
-    bridge 用占位实现（本地回显），UI 骨架完成后再和 state/SDK 对着写真实桥。commit 暂缓。
-15. **协议大同步 0.1.2-alpha.3 → 0.1.5-alpha.1**（用户决定，2026-09-02）：把协议层整体同步到
-    官方 master（= 0.1.5-alpha.1，官方 npm dist-tag `alpha` 亦指该版本）。判定：wire 无破坏性
-    变化（信封/判别 tag/字段名不变，只增不改）。同步内容：① 此前 Unknown 的 3 个事件类型化——
-    `model/selection`、`session-log-deepseek/delivery-accepted`、`subagent/model-selection-policy`
-    （官方 known-event-types.ts 全集 54 种至此全部结构化 + Unknown 兜底）；② MessageSource
-    扩展 kind 结构化（goal/user-rpc/webhook/skill-catalog/skill-invocation/agent-instructions/
-    session-reference/agent-message/subagent-settled/team-message，base 的 model 补
-    provider/model/replayState）；③ SUBAGENT_DESCRIPTOR_VERSION 2 → 3（+agentReasoningEffort）；
-    ④ team 事件版本=2（TeamMessageSnapshot 移除 delivery，读端 Option 兼容旧日志）；
-    ⑤ ImageAttachmentRef 补 optional originalDimensions。**不再追官方新增事件** 的政策自此作废；
-    后续官方新增事件仍按 §4-2 的 known() 兜底 + 有真实消费需要再结构化（本次全部结构化后，
-    该判断门槛回到"官方又新增了 known 事件"）。
+## 8. 数据罗盘 / 统计域 / 数据管道
 
-## 7. 关键事实与坑（已查证）
+### 8.1 数据罗盘：`data/`
 
-- **npm latest 陷阱**：`@deepseek-ai/dsh-sdk-jsonrpc-demo` latest=0.0.1-rc.5（废弃，仓库已删）；
-  `@deepseek-ai/dsh` latest=0.1.1-rc.2（无 sdk profile）。**锁版本是唯一安全路径**。
-- **`reason: 'series'` 是生产事件**（0.1.2-alpha.x）：`packages/core/agent-loop/src/agent.ts` 的
-  `Agent.buildRequest()` 在消息序列边界发出（goal 轮等场景必现）；严格枚举会整体解析失败（v3 已修 + 测试）。
-- **会话 id 必须唯一**（R7 实测）：复用固定 id（如 "s1"）会撞上磁盘持久化日志，
-  turn/end 报 `session already has a persisted log on disk ... (id collision)` error 回合。
-  正式桌面端会话 id 一律唯一化（时间戳前缀）。
-- **审批/询问流在 SDK 通道是死的**：`ask_user_question` 无 provider 转发；通知面固定 4 种，审批要
-  runtime 侧 TS 插件转发 `ctx.approval`。
-- **web_fetch 默认禁用**（SSRF 未防护），`web_search` 可用（60s 超时）。
-- **会话日志 `.jsonl.zstd` = 多独立 Zstandard frames**（Node 只解第一帧，按 RFC 8878 切）；
-  首行是 SessionHeader 非事件。SDK 若做历史直读要处理。
-- **官方 exe 打包 Windows 是 non-goal**：Windows 上 runtime 必须有 node（或自捆 portable node）。
-- **`examples/jsonrpc-agent` 已删**：其角色由 `dsh --profile sdk`（dsh-base + dsh-sdk-app）取代；
-  `@deepseek-ai/dsh` 依赖含 dsh-sdk-app，npm 安装即支持 sdk profile。
-- **官方 SDK 生态**：TS client（`DeepSeekHarness`/`HarnessClient`）+ Python SDK 是 design twin，
-  同 runtime 同协议；ACP（`dsh --profile acp`，Zed 用）与 Claude Code/Codex hooks 是另外两条接入线。
-- **iced 0.14 坑**：无 `theme::Button/Container` 枚举（用 `button::primary/secondary` + 闭包样式）；
-  `Padding` 无 `[f32;4]` From；Tree 非 Clone；`Element::draw/update` 需 viewport 参数；
-  无内置 popover（自定义 advanced widget）；无边框窗口用 `Window::Settings{decorations:false}` +
-  `iced::window::{close,maximize,minimize,drag}`，主窗口 id 用 `window::open_events()` 订阅捕获
-  （无 MAIN 常量，首个 `Id::unique()` 即主窗口）。
-
-## 8. 待办
-
-| 项 | 官方参照 | 状态 |
+| 路径 | 归属 | 内容 |
 |---|---|---|
-| typed errors（4 类） | `sdk/client/src/client.ts` 的 `JsonRpcResponseError` / `RequestTimeoutError` / `SdkProtocolError` / `TransportClosedError` | **完成** |
-| 请求超时 | `client.ts` 的 `requestTimeoutMs` | **完成** |
-| teardown ladder | `sdk/client/src/dispose.ts` | **完成**（Windows 跳过 SIGTERM） |
-| 订阅 / 会话树 scoping | `client.ts` 的 `subscribeSessionTree` | **完成** |
-| run() receipt-to-idle | `sdk/client/src/api.ts` 的 `DeepSeekHarness.run` | **完成** |
-| SdkEncodedImageBlock / reasoningEffort 透传 | `sdk/protocol/src/types.ts` | **完成** |
-| 集成测试（fake runtime） | `sdk/client/tests/fake-runtime.ts` 先例 | **完成** |
-| UI 骨架（顶栏/侧边栏/对话/配置/状态栏） | `packages/client/*` + Zed 布局 | **完成**（占位桥回显） |
-| UI 覆盖式菜单（Popover） | 官方下拉形态 | **完成**（viewport/偏移教训已归档 §6.11） |
-| 窗口按钮 canvas 自绘 + Enter 发送 | — | **完成**（§6.12/§6.13） |
-| bridge 接 dshr-state（真实数据 + 真实运行时） | state 层 | 未开始（UI 骨架完成后再做） |
-| README 双语 + 发布准备 | — | 未做（发布等 SDK 全做完 + 测试完） |
+| `data/dshr.db` | dshr 加工库（rusqlite） | 会话/轮/工具/文件变更事实表（§8.2） |
+| `data/config.json` | dshr 配置 | provider / model / dsh-version |
+| `data/secrets.json` | dshr 敏感 | api-key（0600，不入 git） |
+| `data/dsh-home/` | dsh runtime（**不碰**） | profiles / sessions / storages / 匿名 id |
+| `data/wire-logs/` | dshr 记录 | 全程 JSONL（**lossless 源**） |
+| `data/.pnpm-store/` | pnpm 缓存 | 安装 store |
 
-## 9. 风险
+原则：**db 只含 dshr 自己的加工数据**；dsh 的会话/storages 留在 `dsh-home/`。
 
-- **R1 协议漂移**：0.1.x alpha 无兼容承诺 → lossless 兜底 + 锁 runtime 版本；官方发版后只核对
-  7 个方法 + 已结构化事件。
-- **R2 官方 TS client 永远先行**：新能力（图片等）先到 TS/Python → Rust 侧按需追。
-- **R3 测试基线薄弱**：v3 起协议改动必须带测试，逐步补齐。
-- **R4 Iced 0.14 前沿 API**：`Edit::Enter` 无 shift、Tree 非 Clone、无 popover 等——改动前查
-  `iced_widget-0.14.2` 源码（registry 路径），以官方 widget 实现为准。
+### 8.2 dshr.db 表集
 
-## 10. 里程碑与状态
-
-| 里程碑 | 内容 | 状态 |
+| 表 | 内容 | 写入方 |
 |---|---|---|
-| M0 dsh-sdk-protocol | 全部类型 + fallback + 帧层 | 完成（v4 大同步 0.1.5-alpha.1，54 事件全集结构化，见 §6.15） |
-| M1 dsh-sdk-client | HarnessClient + spawn + dispose + smoke | **完成** |
-| M2 API 对齐 | run / 订阅 / 会话树 / 图片 | **完成**（§8 全绿；剩发布） |
-| M2.5 dshr-state 重建 | 配置/记录/runtime/全链路（真实 runtime 跑通） | **完成**（真实验证：init + 2 轮 prompt，记录 232 条 dsh + 11 条 app） |
-| M3.5 UI 骨架 | 三页 + 侧边栏树 + 对话 + 覆盖菜单 + 窗口控制（占位桥） | **完成**（参考官方 + Zed；见 §6.10-13） |
-| M3.6 UI 接真实数据 | bridge 填 dshr-state（engine 中台 + 真 runtime + 真记录） | **完成**（engine 中台 + 落库 + WireLog；s4 监控页待做） |
-| M4 发布 | crate 打包 + README + 生态目录 | 未开始（用户暂缓） |
-| M3.7 配置页 Zed 化 | 分区导航 + 分组表单 + 主题分段（§12.16） | **完成** |
-| M3.8 数据管道（§11.4） | WireLog 回放 → fold → 落库 → UI 真 bridge（s1–s4） | 未开始 |
+| `runtimes` | id/name/state/created/command/args/cwd/env | 待做（多 runtime 管理） |
+| `sessions` | id/runtime_id/cwd/parent/created/status/title/last_seq | ✅ fold 快照 |
+| `requests` | runtime/session/turn/method/time/duration_ms/success/error_message | 待做（请求层折叠） |
+| `turns` | turn_id/session/turn/started/ended/duration/reason + token 六桶列 | ✅ fold 快照 |
+| `tool_calls` | call_id/name/arguments/result_text/is_error/duration_ms/meta | ✅ fold 快照 |
+| `file_ops` | session/turn/time/path/op/lines_added/lines_removed | ✅ 自 `meta.diffs` 折叠 |
+| `runtime_logs` | runtime stderr 行（审计） | 待做（engine 消费 stderr） |
 
-## 11. 数据罗盘 / 统计域 / 数据管道（v5 草案，2026-09-02）
-
-> 背景：v3 曾有一整套 dshr-data（rusqlite 加工库 + §9.5 ui/core/bridge 分层），
-> 212ce27「结构文档大更」删除。全量可恢复于 git `d99a309`（`dshr-crud/src/schema.rs` 等）。
-> 本章为吸收旧设计、对齐 v4/v5 现状的新草案——**先落文档，再小步实施**。
-
-### 11.1 数据罗盘：`data/`（配置与库收进一个目录）
-
-| 路径 | 归属 | 内容 | 状态 |
-|---|---|---|---|
-| `data/dshr.db` | dshr 加工库（rusqlite） | 目录/请求/轮/工具/文件变更事实表（§11.2） | 新建（v3 同名，schema 重做） |
-| `data/config.json` | dshr 配置 | provider / model / dsh-version | 现在 workspace 根 → **迁入**（§6.16 后 UI 与 state 同改一处路径） |
-| `data/secrets.json` | dshr 敏感 | api-key（0600，不入 git） | 现在 api-key 在 config.json → **拆出** |
-| `data/dsh-home/` | dsh runtime（**不碰**） | profiles/sessions/storages/匿名 id | 现状不变 |
-| `data/wire-logs/` | dshr 记录 | 全程 JSONL（lossless 源） | 现状不变 |
-| `data/.pnpm-store/` | pnpm 缓存 | 安装 store | 现状不变（可移出 data/ 再议） |
-
-原则：**db 只含 dshr 自己的加工数据**；dsh 的会话/storages 留在 `dsh-home/`；配置与敏感项随罗盘收进 data/（runtime.rs 注释「data/ sqlite + settings（未来）」即此）。迁移做小步：config.rs/setting.rs 的 config_path 一处改 + 首启生成模板。
-
-### 11.2 dshr.db 表集（修订 v3 schema，§6.17）
-
-| 表 | 内容 | 相对 v3 |
-|---|---|---|
-| `runtimes` | id/name/state/created/command/args/cwd/env | 沿用 |
-| `sessions` | id/runtime_id/cwd/parent/created/status/state/title/last_seq | 沿用（title 由 session/title 事件写） |
-| `requests` | runtime/session/turn/method/time/duration_ms/success/error_message | 沿用 |
-| `turns` | turn_id/session/turn/started/ended/duration/reason + token 六桶列（input/output/cache_read/cache_write/reasoning/total） | 沿用 |
-| `tool_calls` | call_id/name/arguments/result_text/is_error/duration_ms/meta（= `meta.diffs` 原样 JSON） | 沿用 |
-| `file_ops` | session/turn/time/path/op(edit\|write\|delete\|str_replace)/lines_added/lines_removed | **新增**（自 meta.diffs 折叠） |
-| `runtime_logs` | runtime stderr 行（审计） | 沿用 |
-
-**不建 events 全量表**：wire-logs JSONL 已是 lossless 源，重放即查询（§9.5 转接原则同源）；
+**不建 events 全量表**：wire-logs JSONL 已是 lossless 源，重放即查询；
 避免双写与体积。按 (session,type) 扫描走 WireLog 重放，确有热点再加窄表。
 
-### 11.3 统计域（可统计全集——**含 v3 stream 摘要，不保留逐 chunk**）
+**写入语义 = 会话整体重放**：`persist_snapshot` 一个事务内 UPSERT `sessions` +
+DELETE+INSERT `turns`/`tool_calls`/`file_ops`，同一快照重复 persist 行数不变（幂等）。
 
-v3 起 `assistant/chunk` 已移除；`assistant/message.stream` / `assistant/attempt.stream` 记录紧凑流。dshr 展开后只保留统计摘要（chunks / 首 token 延迟 / 时长 / text/reasoning 字符数），**不保留逐 chunk 内容**，避免快照重复克隆。
+### 8.3 统计域（含 stream 摘要，**不保留逐 chunk**）
 
-其余按层级全统计（落库 = §11.2 事实表；跨层聚合 = read 层函数，不入库）：
+`assistant/message.stream` / `assistant/attempt.stream` 记录紧凑流；dshr 展开后只保留统计摘要
+（chunks / 首 token 延迟 / 时长 / text 与 reasoning 字符数），**不保留逐 chunk 内容**
+（避免快照重复克隆；逐 chunk 落盘经评估空间代价不可接受）。
+
+其余按层级全统计（落库 = §8.2 事实表；跨层聚合 = read 层函数，不入库）：
 
 | 层 | 统计项 |
 |---|---|
-| 请求 | method / time / duration_ms / success / provider+model（request/header）/ reason（含 series）/ LlmFailure（code/status） |
-| 轮 | turn/start–end、tokens 六桶、reason、step 数（内容文本不进库——正文在会话 jsonl） |
-| 工具 | 每工具名：次数 / 成功失败 / 总耗时 / 平均耗时；call↔result 配对、error 标记 |
-| 文件 | 每 path：op 计数、+n / −m 合计、按会话/轮时间线（file_ops 表） |
-| 会话 | 起止 / 轮数 / 总 token 六桶 / 工具次数 / 错误数 / 标题（sessions+turns 聚合） |
-| runtime/日/时/模型 | 请求数、tokens、失败数、耗时（查询层按维度分组） |
+| 请求 | method / time / duration_ms / success / provider+model / reason / LlmFailure |
+| 轮 | turn/start–end、tokens 六桶、reason、step 数 |
+| 工具 | 每工具名：次数 / 成功失败 / 总耗时 / 平均耗时；call↔result 配对 |
+| 文件 | 每 path：op 计数、+n / −m 合计、按会话/轮时间线 |
+| 会话 | 起止 / 轮数 / 总 token 六桶 / 工具次数 / 错误数 / 标题 |
 | 系统 | runtime stderr、进程退出码、spawn/退出时间 |
 
-### 11.4 数据管道层（§9.5 转接原则的 v5 落地形态）
+### 8.4 数据管道
 
 ```
 wire 事件（SDK 通知 / WireLog 回放）
    │  同一巡两个去向，同一折叠语义
    ▼
-fold（纯函数，可测）            ──►  内存快照：消息流 / turn 统计 / 会话树
-   │                                  （model.rs 视图模型，UI 只消费它）
+fold（纯函数，可测）      ──► 内存快照：消息流 / turn 统计 / 会话树
    ▼
-落库（事实表写入，§11.2）      ──►  历史查询：监控页 / 会话目录 / 跨会话聚合
+落库（事实表写入）        ──► 历史查询：监控页 / 会话目录 / 跨会话聚合
 ```
 
-- fold 与落库**同源同巡**：dshr-state 常驻事件循环（session.rs full round 的扩展形态），每条事件先 fold 成内存快照增量、再按事实表规则写入；
-- **离线模式**：WireLog 回放走同一 fold（UI 开发/回归用，官方快照测试思路）——不 spawn runtime、不烧 token；
-- UI 视图模型升级顺序（model.rs）：`ChatState.stats` 结构化 → `MsgView` 内容块化（text/reasoning/tool 配对/notice）→ `ToolView` 挂 `meta.diffs` 渲染行级 diff；
-- 监控页（§11.3 read 聚合 + 页面）在管道 s3（真 bridge）后做，数据源与 StatsLine 同一折叠。
+- fold 与落库**同源同巡**；**离线模式**：WireLog 回放走同一 fold（UI 开发/回归用，
+  不 spawn runtime、不烧 token）。
 
-engine 落地（2026-09）：常驻会话中台在 `dshr-state::engine`，UI 只搬运命令/事件；落库 + WireLog 已接线。
+---
 
-### 11.5 小步实施（s1–s4，延续小步结对节奏）
+## 9. 决策记录
 
-1. **s1**：`dshr-state` 新增 fold 模块（纯函数）：WireLog JSONL → `ChatSnapshot`/`StatsAccum`；测试用现有会话 fixture；
-2. **s2**：消费循环 + 落库：rusqlite `open()/init_schema()`（§11.2）+ 写入层 + 往返测试（v3 的 dshr-crud 模式）；
-3. **s3**：UI 真 bridge：占位桥换事件订阅，model.rs 升级（s1 快照形状即模型）；
-4. **s4**：监控页 + 配置页「数据」分区（罗盘状态/库大小/迁移入口）。
+> 只记**当前有效**的决策与其理由；被推翻的见 AI-LOG 的决策简史。
 
-## 12. 决策记录追加（v5）
+### 9.1 协议与 runtime
 
-16. **配置页 Zed 化（2026-09-02，用户偏好）**：左分区导航（选中 accent 竖条）+ 右分组表单（节标题 + caption 说明行 + 输入框 Zed 式 layer2/focus-accent）；分区 = 通用/模型/运行时/API；保存仍显式按钮（config.json 非自动保存）。范围节俭——不为纯装饰新增 theme 字段，输入框样式新增 `text_field` 一处。
-17. **数据罗盘 = data/ 收口 + dshr.db 只装自己（2026-09-02，草案）**：恢复 v3 的表设计骨架但**不建 events 重复表**（wire-logs 即 lossless 源）；chunk 不入库不聚合；统计域按 §11.3 分层全集设计，除 chunk 外无遗漏项（漏项在实施时补）。
-18. **engine 下沉：常驻会话中台进 dshr-state（2026-09，架构对齐 DESIGN v3 §9.5 / v4 M3.6 意图）**：s3 曾把常驻 worker（Machine/RealBridge，dshr-ui worker.rs/real.rs）放在 UI 旁并让 UI 直接 import dsh-sdk-client，旁路 state 层。现整体下沉为 `dshr-state::engine`（判定/装配/事件循环/fold→快照 + 落库 + WireLog 全在 state 侧），dshr-ui 只经 bridge 搬运命令/事件，不再直接依赖 dsh-sdk-client/dsh-sdk-protocol；原 worker/real 文件废弃待删。
+1. **runtime = `dsh --profile sdk`，锁版本**：npm `@deepseek-ai/dsh` 的 `latest` 长期不含 sdk profile
+   （现为 0.1.7-rc.2，`next` 是 0.2.0-rc.1），**必须显式锁版本**。当前锁 `0.1.7-rc.2`。
+2. **DSH_HOME 独立**：spawn 时给 runtime 单独 `DSH_HOME`（`<管理目录>/data/dsh-home`），
+   不碰用户 `~/.dsh`；工作区经 `DSH_CWD` env + `InitializeParams.cwd` 锁死。
+3. **结构化范围 = 全集**：官方 `known-event-types.ts` 全集（当前 59 种）全部结构化，
+   另有 `Unknown` lossless 兜底。同步按上游标签 diff 驱动（见 AI-LOG §5）。
+4. **序列化兼容**：官方新增字段一律 `Option + skip_serializing_if`（wire 可选，缺省 = 旧行为）。
+5. **版本校验读已安装包的 `package.json`**：**不可**用 `InitializeResult.serverInfo.version`
+   （官方硬编码 `'0.0.1'`，见 AI-LOG §2.1）。
+6. **0.2.0-rc.1 暂不采纳**：经标签 diff 核实其协议层零改动，换版本无功能收益、反引入行为变量。
 
-19. **协议同步 0.1.5-alpha.1 + runtime 版本校验 + secrets + stream 摘要（2026-09-10，用户决定）**：
-    协议层对齐 deepseek-harness `0.1.5-alpha.1` 的 54 种已知事件（新增 `system/message`、`assistant/attempt`、`tool/ptc-dispatch*`、`feedback/message-*`，移除 `assistant/chunk`、`tool/code-dispatch*`）；`ContentBlock` 补 `file`。
-    `runtime::ensure` 改为读取已安装 `@deepseek-ai/dsh/package.json` 版本，不匹配时重写 manifest 并 `pnpm install --force`；API key 迁到 `data/secrets.json`（Unix 0600），空 key 时设置页/状态栏警告并回退 Fake；v3 `AssistantStreamRecord` 提供 `expand()`，fold 只保留统计摘要，不保留逐 chunk。
+### 9.2 发布与获取
+
+7. **发布策略 = 独立 crate + 生态目录**（awesome-dsh-plugin / dshget / market catalog）；
+   官方树内收编等协议 1.0 稳定后（参照 python/ 进树先例）。**发布等 SDK 全做完 + 测试完再说**。
+8. **runtime 获取**：dsh 本体放 `dshr/dsh/`（发布不带，运行时检测/下载，删除可重下）。
+   包管理器 **pnpm**：共享全局 store 去重 + `--ignore-scripts`（实测 node-pty/koffi 的 tarball
+   自带预编译产物，跳过构建完全可用——免 node-gyp 工具链）+ `--config.minimumReleaseAge=0`
+   （pnpm 供应链年龄策略默认拒绝刚发布的 alpha 包）。node 检测 ≥22.19。
+
+### 9.3 state 分层
+
+9. **三层：raw / engine / fold**（2026-09-28 定）。理由与边界见 §3。
+10. **`SessionDriver` trait 粒度 = runtime 级**，暴露三进四出 + stderr + 退出信号（§3.5）。
+11. **快照读取用 B 方案**（拉 + 变更通知）：engine 持快照缓存，事件只发轻通知（§7.2）。
+12. **落盘完整性原则**（§3.6）：逐 chunk 不落盘、改为按会话记录完整 chunk 序列；
+    stderr 与进程退出必须落盘。
+13. **`session.rs` 删除**（推迟到 M4）：它用的 `HarnessClient::run()` 语义当前 engine 接口没有，
+    直接删会丢功能；需先补 `run()` 语义与可配置 WireLog 目录。
+14. **`mod.rs` 弃用**：统一 Rust 2018+ 风格 `x.rs` + `x/`。
+
+### 9.4 UI
+
+15. **页面设计全参考官方 deepseek-harness**（用户指令）：token 对齐官方
+    `packages/client/ui-theme/src/styles/design-platform.css` 的 `--dsw-alias-*`
+    （bg_base 21,21,23 / layer1-3 / label_primary 249,250,251 / accent deepseek-400 103,158,254 /
+    border rgba(255,255,255,0.06) / bubble 44,44,46）。布局参考 Zed（顶栏标签 + 窗口控制同排、
+    侧边栏 runtime + 会话树、底部图标栏）。
+16. **渲染后端 = wgpu 默认，tiny-skia 作兜底**：tiny-skia 纯 CPU 光栅化在弱机/高缩放下
+    **滚轮直接卡死**（实测），故 wgpu 为默认并保留 `fallback::Renderer<wgpu, tiny_skia>`
+    （设备创建失败自动退回，不白屏）。实测常驻：wgpu + `DSHR_DPI=auto` 97 MB；
+    wgpu + `WGPU_BACKEND=gl` 52 MB；tiny-skia 19 MB（但会卡）。
+    `features` 由 `dshr-ui` 显式声明（根 `Cargo.toml` 关掉 iced 默认 features）。
+    **附带约束（易踩）**：`iced-code-editor` 是路径依赖，cargo feature 是**并集**——
+    该 crate 的 `Cargo.toml` 已打补丁显式关掉 iced 默认 features（原文件备份 `Cargo.toml.bak`）；
+    **重新下载该仓库会让补丁失效**，判定命令 `cargo tree -p dshr-ui -i wgpu` 应输出 `nothing to print`。
+17. **Windows DPI 不一致的兜底**：本机 `GetDpiForSystem()=96` 而显示器 192 DPI，此时 **winit
+    自相矛盾**（窗口按 1:1 创建、却向 iced 报缩放 2.0），可见区域恒为画布的 `1/winit缩放`，
+    任何 `scale_factor` 都无法自洽。修法：`main()` 里建窗口**之前**调
+    `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE)`（`dpi.rs::make_consistent()`），
+    仅当检测到显示器被缩放时启用；`DSHR_DPI=aware|unaware|auto` 可强制覆盖。
+    代价：Windows 会按显示器 DPI 做位图拉伸（发糊）——**糊/切二选一**。
+    附带修正：窗口尺寸必须写在 `window::Settings.size` 里（`.window_size()` 会被随后的
+    `.window(..)` 覆盖）；位置用 `Position::Specific` 自行居中（`Position::Centered` 在 DPI
+    不一致时算错）；顶栏三个窗口图标用文字字形（U+2212 / U+25A1 / U+2715），
+    因为 `canvas` 自绘在 tiny-skia 后端下画布拿到 0 尺寸、完全不出图。
+18. **Enter 发送**：iced 0.14 `text_editor` 把 Enter 发布为 `Action::Edit(Edit::Enter)`，
+    插入换行是 App 收到 action 后 `content.perform()` 才执行的——`on_action` 里拦截它转 `Send`。
+    **0.14 限制**：`Edit::Enter` 不携带 shift 信息，**Shift+Enter 也会发送**；多行文本用中间换行。
+19. **覆盖式菜单自研（Popover）**：iced 无内置，`widgets/popover.rs` 用 `features=["advanced"]`
+    自定义 `Widget::overlay`。三个硬教训：**viewport 必须传绝对坐标 `layout.bounds()`**
+    （传 `Rectangle::with_size` 会让整个菜单被裁剪——"画了但看不见"）；锚点 =
+    `layout.position() + translation`；菜单定位在宿主右下、偏移 +8（0 偏移会让第一项压在 ⋯
+    正下方，点击 ⋯ 误触新建），右缘超出视口时左移钳制。
+20. **配置页 Zed 化**：左分区导航（选中 accent 竖条）+ 右分组表单（节标题 + caption 说明行 +
+    Zed 式输入框）；分区 = 通用/模型/运行时/API；保存仍显式按钮（config.json 非自动保存）。
+
+---
+
+## 10. 关键事实与坑
+
+- **npm latest 陷阱**：`@deepseek-ai/dsh` 的 `latest` 长期不是最新、且不含 sdk profile。
+  **锁版本是唯一安全路径**。
+- **`reason: 'series'` 是生产事件**：官方 `packages/core/agent-loop/src/agent.ts` 的
+  `Agent.buildRequest()` 在消息序列边界发出（goal 轮等场景必现）；严格枚举会整体解析失败
+  （已由 `known()` 兜底 + 测试覆盖）。
+- **会话 id 必须唯一**：复用固定 id 会撞上官方磁盘持久化日志，`turn/end` 报
+  `session already has a persisted log on disk … (id collision)` error 回合。
+  正式会话 id 一律唯一化（epoch 前缀）。
+- **engine 在「一个 runtime 都没有」时必须阻塞在命令通道上**：`FuturesUnordered::next()`
+  在**空集合**上立刻返回 `None`，若不特判就会让 `Engine::next()` 立即返回空批 →
+  总线循环（`dshr-ui/src/bridge.rs`）空转烧掉一个核（界面上毫无异常）。
+  实测覆盖：`dshr-state/tests/engine_flow.rs` 的 `no_runtime_waits_for_command`。
+  触发条件常见：程序刚启动（还没 StartRuntime）、用户停掉最后一个 runtime。
+- **审批/询问流在 SDK 通道是死的**：`ask_user_question` 无 provider 转发；通知面固定 4 种，
+  审批要 runtime 侧 TS 插件转发 `ctx.approval`。
+- **`web_fetch` 默认禁用**（SSRF 未防护），`web_search` 可用（60s 超时）。
+- **会话日志 `.jsonl.zstd` = 多独立 Zstandard frames**（Node 只解第一帧，按 RFC 8878 切）；
+  首行是 `SessionHeader` 非事件。SDK 若做历史直读要处理。
+- **`SESSION_FORMAT_VERSION` 已为 4**（官方 0.1.7-rc.2 起），日志格式有结构性变更。
+- **官方 exe 打包 Windows 是 non-goal**：Windows 上 runtime 必须有 node。
+- **`examples/jsonrpc-agent` 已删**：角色由 `dsh --profile sdk`（dsh-base + dsh-sdk-app）取代。
+- **官方 SDK 生态**：ACP（`dsh --profile acp`，Zed 用）与 Claude Code/Codex hooks 是另外两条接入线。
+- **iced 0.14 坑**：无 `theme::Button/Container` 枚举（用 `button::primary/secondary` + 闭包样式）；
+  `Padding` 无 `[f32;4]` From；Tree 非 Clone；`Element::draw/update` 需 viewport 参数；
+  无内置 popover；无边框窗口用 `Window::Settings{decorations:false}` +
+  `iced::window::{close,maximize,minimize,drag}`，主窗口 id 用 `window::open_events()` 订阅捕获
+  （无 MAIN 常量，首个 `Id::unique()` 即主窗口）。
+  **改动前查 `iced_widget-0.14.2` 源码**（registry 路径），以官方 widget 实现为准。
+
+---
+
+## 11. 代码规范
+
+1. **官方引用必须钉到具体文件 + 类/方法/函数**（行号可加分），例如
+   `packages/core/session/src/types.ts 的 SessionEventMap['turn/end']`、
+   `packages/llm/llm/src/types.ts 的 ImageBlock.offloaded`。
+2. **行数约束**：单文件平均 ≤350 行；超了拆文件。
+3. **注释三级制**（用户要求）：
+   - **文件级**：这个文件干什么、主要用途、为什么需要、**上接**谁、**下接**谁。
+   - **函数 / trait 级**：为什么需要它、输入输出是什么、主要功能是什么。
+   - 保留既有「官方对应」钉法。
+4. **测试为硬约束**：协议改动无回归测试不合并。
+5. **文件风格**：Rust 2018+（`x.rs` + `x/`，**不用 `mod.rs`**）。
+6. **提交前跑**：`cargo test --workspace`、`cargo fmt --all -- --check`。
+   注意 PowerShell 会把 cargo 的 stderr 误判为失败（见 AI-LOG §2.3）。
+
+---
+
+## 12. 待办与里程碑
+
+### 12.1 里程碑
+
+| 里程碑 | 内容 | 状态 |
+|---|---|---|
+| M0 dsh-sdk-protocol | 全部类型 + fallback + 帧层 | **完成**（同步 0.1.7-rc.2，59 事件全集） |
+| M1 dsh-sdk-client | HarnessClient + spawn + dispose + smoke | **完成** |
+| M2 API 对齐 | run / 订阅 / 会话树 / 图片 | **完成**（剩发布） |
+| M2.5 dshr-state 重建 | 配置/记录/runtime/全链路（真实 runtime 跑通） | **完成** |
+| M3.5 UI 骨架 | 三页 + 侧边栏树 + 对话 + 覆盖菜单 + 窗口控制 | **完成** |
+| M3.6 UI 接真实数据 | bridge 接 state（真 runtime + 真记录 + 落库） | **完成** |
+| M3.7 配置页 Zed 化 | 分区导航 + 分组表单 | **完成** |
+| **S1 state 分层** | raw/engine/fold 三层（M1 改名、M1.5 store 拆分、M2 SessionDriver、M3 新 engine 已完成） | **进行中**（M4 部分完成；M5 UI 多 runtime、M6 快照 B 方案 待做） |
+| **S3 契约测试重建** | 按「各 crate 一个 `tests/`」重建（§12.4） | **进行中**（3/5 项完成：state × 3 文件 + protocol × 2 文件，31 条绿） |
+| S2 数据管道完善 | stderr/退出落盘、多会话路由、B 方案读取 | 未开始 |
+| M4 发布 | crate 打包 + README + 生态目录 | 未开始（用户暂缓） |
+| M3.8 监控页 | §8.3 read 聚合 + 页面 | 未开始 |
+
+### 12.2 state 分层实施步骤（每步可编译、可测）
+
+| 步 | 内容 | 验证 |
+|---|---|---|
+| **M1 ✅** | 旧 `engine` → `raw`（`Engine` → `Runtime`）；`mod.rs` 全消除；`cargo fmt` 独立落地 | 62 测试通过、fmt 合规、事件 59=59 |
+| **M1.5 ✅** | 拆 `store.rs`（844 行）→ 门面 + `store/{error,schema,convert,write,tests}` | 62 通过 / 0 warning |
+| **M2 ✅** | 引入 `SessionDriver` trait + `HarnessClient` 实现；raw 改经 trait 调用 | 纯重构、无行为变化；新增「驱动注入」测试证明可替换（63 通过） |
+| **M3 ✅** | 新 `engine.rs`：runtime 注册表 + 每会话态；搬入脏检测/落库；**stderr 与退出落盘接通**（`runtime_logs` / `runtimes` 表首次有写入方）；`record::Recorder` 重新接入（app 轨迹 + 线级记录同源） | 5 条 engine 集成测试（假 driver，不起进程）：主链路/会话重置/多 runtime 路由隔离/退出上报/stderr 落库（67 通过） |
+| M4 | raw 只留进程与协议 → 改发 wire 级事件批（带标） | 部分已完成：`raw.rs` 已是纯进程句柄（442 行）、`session.rs` 已删除、WireLog 路径已归 engine 管理 |
+| M5 | UI bridge 换到新 `EngineCmd`/`EngineEvent`（加 runtime/session 标） | UI 手验 |
+| M6 | 快照读取改 B 方案 | UI 手验 + engine 单测 |
+
+### 12.3 其它待办
+
+| 项 | 状态 |
+|---|---|
+| README 双语 + 发布准备 | 未做（发布等 SDK 全做完 + 测试重建完） |
+| portable node 自动安装 | 未做（当前 node 缺失时报清晰错误） |
+
+### 12.4 测试策略（2026-09-29 调整）
+
+**现状（2026-09-29 更新）：重建进行中，已落地 31 条契约测试**（`cargo test --workspace` 全绿）：
+
+| crate | 文件 | 条数 | 覆盖 |
+|---|---|---|---|
+| `dsh-sdk-protocol` | `tests/event_catalog.rs` | 5 | 事件全集对账（对锁定快照）+ 降级识别（`degraded_event`）+ merge-extensible 兜底 |
+| `dsh-sdk-protocol` | `tests/frame_shape.rs` | 6 | **真实录制帧**的形状对账 + 20 种消息来源建模（含漂移容忍）+ 内容块 roundtrip + 请求面/信封 |
+| `dshr-state` | `tests/engine_flow.rs` | 7 | engine 主链路（prompt→通知→折叠→落库）、多 runtime 路由隔离、stderr/退村落盘、**空注册表不空转**、**降级写入 app 轨迹** |
+| `dshr-state` | `tests/fold_projection.rs` | 7 | fold 投影语义（消息序/工具配对/token/轮结算/错误口径 + **在线与回放同源同巡**） |
+| `dshr-state` | `tests/store_persistence.rs` | 4 | 落库幂等、替换语义、空 session_id 拒绝、多会话隔离 |
+| `dshr-state` | `tests/engine_session.rs` | 2 | 真实会话逐步透明账本（`DSHR_LIVE=1`）+ 冷启动负例 |
+
+`dsh-sdk-client`（帧层/配对/超时，需 node fixture）与 `dshr-ui`（纯映射函数）**尚未重建**。
+下面保留「为什么当初清空」的原始记录与重建方式。
+
+#### 为什么清空
+
+旧布局是**按文件散落**的：一部分内联在 `src/*.rs`（`#[cfg(test)] mod tests`），
+一部分是 `src/<模块>/tests.rs`（`fold` / `store` / `engine` / `raw` 四处）。
+三个问题：
+
+1. **测试与实现抢同一文件的行数预算**。本项目对单文件行数有约束（≤350 行为宜），
+   内联测试把已经接近上限的文件顶破；重构时被迫在「拆实现」与「拆测试」之间二选一。
+2. **改实现会顺手改到测试**，两者在同一文件的 diff 里纠缠，review 分不清
+   「行为真变了」还是「断言跟着改了」。
+3. **契约测试放错地方**。「wire 帧能否解析」「落库是否幂等」这类**对外契约**，
+   用集成测试（`tests/`）表达才正确——它们只依赖 `pub` 接口，从而在重构内部结构时
+   保持不动。
+
+#### 新约定
+
+| 测试类型 | 放哪 | 依赖什么 |
+|---|---|---|
+| **契约 / 集成**（对外行为、跨模块链路） | `<crate>/tests/<关注点>.rs` | 只用 `pub` 接口 |
+| **纯内部单元**（私有函数边界） | 允许内联 `#[cfg(test)] mod tests`，**仅当**该文件离行数上限还有余量 | 可用私有项 |
+
+**不再**新建 `src/<模块>/tests.rs`。每个 crate 的 `tests/` 目录里有 `_conventions.md`
+（下划线前缀不会被 cargo 当作测试目标），写明该测什么与该 crate 的注意事项。
+
+#### 已预留的测试接缝（**无门控的正式 API**）
+
+`dshr-state` 保留 11 处测试接缝。2026-09-29 按用户要求**取消 `#[cfg(test)]` 门控**：
+「以后测试都是直接跑最终和 dsh 沟通的实际测试了，直接通过 test 块来模拟触发和接收就可以了」。
+
+**设计含义**：它们不再是「测试专用代码」，而是**注入式测试基础设施**——正式 API 的一部分。
+代价是生产二进制里也包含它们（几行、无副作用）；收益是测试与生产走**同一条代码路径**，
+不存在「`cfg` 掉了才发现生产路径没编译」这类问题。
+取消门控时顺带删掉了 `injected` 字段——它是**只写不读**的死字段，正是取消门控才暴露出来的。
+
+| 接缝 | 作用 |
+|---|---|
+| `SessionDriver` trait | 把进程层抽象掉：假 driver 只回 `Ok(...)`，测试自持通知流发送端造事件 |
+| `Runtime::{with_driver_for_test, inject_stderr_for_test, mark_exited_for_test, force_fake}` | 注入 driver/stderr、模拟退出、强制 Fake |
+| `Engine::{register_injected_runtime[_with_stderr], with_db, store_ref, recorder_ref, with_recorder_for_test, mark_runtime_exited_for_test}` | 注册「已就绪」runtime、注入内存库/记录器、断言落库与 app 轨迹 |
+
+#### 两类测试，别混
+
+| 类型 | 起进程 | 烧 token | 何时跑 |
+|---|---|---|---|
+| **契约/集成**（注入假 driver） | 否 | 否 | 每次 `cargo test` |
+| **真实会话**（与 dsh 沟通） | 是（官方 dsh） | **是** | 显式 `DSHR_LIVE=1`，低谷期 |
+
+真实会话测试用环境变量门控 + 无条件 `return` 跳过（**不用** `#[ignore]`）：
+没配密钥时自动跳过，配了就真跑，比 `#[ignore]` 更显式。
+
+`dshr-state/tests/engine_session.rs` 是真实会话的**逐步透明账本**：它按
+「Start → Started → Prompt → 等 idle → Stop」逐步打印当步的
+「事件摘要 + sessions 汇总 + runtime_logs 行数 + wire-log 字节数 + 消息明细」。
+为什么值得存在：本项目已经吃过一次教训——`runtimes` 与 `runtime_logs` 两张表建了却
+长期**没有写入方**，从代码表面完全看不出来，只有查询才会暴露。
+这个账本把「表里到底有没有东西」变成可执行的断言。
+
+##### 运行真实会话测试的前提（实测记录，2026-09-29）
+
+真实会话测试会触发 `runtime::ensure` → `pnpm install --force`，装**588 个包**
+（含 `@deepseek-ai/dsh-*` 全家桶与 `sharp` / `sherpa-onnx` / `koffi` 的**全平台**二进制；
+`@deepseek-ai/dsh` 本体只有 69 KB，但 81 个直接依赖会解析成这么多，且**没有一个是
+optional**，无法裁剪）。
+
+**实测结论：官方 registry 在弱网下装不完，必须走镜像。** 两次尝试都在 356/587 处
+因 `registry.npmjs.org` 的 socket 超时（`error (23)`）中断（659s / 300s+）；
+换 `registry.npmmirror.com` 后 **`Done in 56.6s`**（`reused 561` + 新下 26）。
+
+因此 `runtime.rs` 做了三项加固（见该文件头「下载稳定性」）：
+
+| 加固 | 做法 | 为什么有效 |
+|---|---|---|
+| **重试 + 指数退避** | 同 registry 最多 3 次，退避 5/10/20s | pnpm store 是 content-addressable 的：**重试即续传**，不是从头再来（实测 `reused 561`） |
+| **`.npmrc` 提高取数韧性** | `fetch-retries=10`、`fetch-timeout=600000`、`network-concurrency=4`、`prefer-offline=true` | npm 默认 `fetch-retries=2`，对弱网太弱；降并发能减少被掐断 |
+| **registry 回退链** | 官方 → `registry.npmmirror.com`，可用 `DSHR_NPM_REGISTRY` 环境变量或 `config.json` 的 `npm-registry` **覆盖为只走指定源**（内网代理场景） | 镜像已镜像 `@deepseek-ai` scope（实测 dist-tags 与官方一致） |
+
+**不做打包归档**：用户明确要求「不在仓库里打包一个，还是通过 pnpm 下载构建」——
+所以不引入"预热归档 + 校验 + 解压"那条路。
+
+#### 待办：等待模型期间没有心跳
+
+M3 实测暴露的产品问题：engine 只在**状态有变化**时发事件。发完 prompt 后直到 runtime
+返回首条事件之前，`engine.next()` 安静等待——真实 LLM 首字节延迟可达几十秒，
+UI 上表现为「点了发送之后一片静止」，用户无法区分「在等模型」与「卡死了」。
+建议加一个「正在等待模型」的周期心跳（或把 `request/header` 这类中间事件折成
+一行状态提示）。**注意区分两类等待**：等本地事件（毫秒级）与等真实 API（可达分钟级），
+测试里的单步超时必须分开设（本项目在这里误判过两次）。
+
+#### 三条踩过的坑（重建前先读）
+
+1. **`assistant/message` 帧有必填字段**：`data` 需 `turn` / `step` / `message`
+   （含 `id`/`role`/`content`/`source`），且 `source.kind = "model"` **必须带
+   `provider` 与 `model`**。漏字段**不报错**——`known()` 反序列化失败会静默降级成
+   `Unknown`，测试只表现为「事件没反应、等超时」。**必须保留一条帧形状自检测试**。
+2. **广播通道的生命周期**：假 driver 持有自己的发送端克隆，测试 drop 手里的发送端
+   **关不掉**流。模拟「进程退出」要用 `mark_exited_for_test`，不要靠 drop。
+3. **一条测试只验一件事**：测试助手的推进循环有副作用（可能让 engine `teardown`
+   并移除 runtime），与后续断言写在同一条测试里会互相吃掉状态。
+
+#### 重建的优先级（建议）
+
+1. ✅ `dshr-state`：engine 主链路（prompt→通知→折叠→落库）、多 runtime 路由隔离、
+   stderr/退村落盘 —— 这些是**当前最复杂、最不可见**的逻辑（`tests/engine_flow.rs`）；
+2. ✅ `dsh-sdk-protocol`：事件全集对账 + 形状解析（协议漂移是头号风险）
+  （`tests/event_catalog.rs` + `tests/frame_shape.rs`）；
+3. ✅ `dshr-state`：fold 投影语义、store 幂等（`tests/fold_projection.rs` + `tests/store_persistence.rs`）；
+4. ⬜ `dsh-sdk-client`：帧层/配对/超时（node fixture，不烧 token）；
+5. ⬜ `dshr-ui`：纯映射函数（**不要**在测试里起窗口）。
+
+**重建的意外收获**（这三条都是「不写测试就看不见」的问题，详见 AI-LOG §2.6/§2.1）：
+
+- `Engine::next()` 在注册表为空时立即返回空批 → 总线空转烧一个核（已修）；
+- `MessageSource` 漏移植 `system-prompt` / `runtime-context` 两个官方 0.1.7-rc.2 就有的 kind →
+  **每条** `system/message` 与注入类 `user/message` 整条降级 `Unknown`（已修，并由真实帧对账守住）；
+- 顺着上一条做全面取证，又补了 5 个真实可达的 kind（`plan-mode` / `model-selection` /
+  `user-approval` / `ptc-mode` / `compact-checkpoint`），并把「降级」变成**可识别、可汇总**
+  （`Unknown.degraded` + engine 的 `event.degraded` 轨迹 + `scripts/scan-message-sources.mjs`）。
+
+---
+
+## 13. 风险
+
+- **R1 协议漂移**：0.1.x 无兼容承诺 → `Unknown`/`known()` 双层 lossless 兜底 + 锁 runtime 版本；
+  同步前跑 `scripts/compare-session-events.mjs` + 上游标签 diff。
+- **R2 官方 TS client 永远先行**：新能力（图片等）先到 TS/Python → Rust 侧按需追。
+- **R3 测试基线**：协议改动必须带测试；UI 层目前只有少量单测，
+  **前端到 state 的数据流没有自动化验证**（需要真实 runtime 全链路，消耗 token）。
+- **R4 Iced 0.14 前沿 API**：`Edit::Enter` 无 shift、Tree 非 Clone、无 popover 等——
+  改动前查 `iced_widget-0.14.2` 源码。
+- **R5 `iced-code-editor` 路径依赖补丁易丢**：重新下载该仓库会带回 wgpu 依赖树
+  （判定命令见 §9.16）。

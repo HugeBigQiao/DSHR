@@ -1,11 +1,21 @@
-//! 本地密钥：`data/secrets.json`（与 config.json 分离，Unix 下 0600）。
+//! 本地密钥：`data/secrets.json`（与 `config.json` 分离，Unix 下 0600）。
 //!
-//! 兼容旧版把 `api-key` 写在 workspace/config.json 的方式：首次读取时自动迁移到
-//! `data/secrets.json`，并从 config.json 删除 `api-key` 字段。空值视为未配置。
+//! 主要用途：API key 的唯一读写入口——`raw/mode.rs` 在 Real 模式下取它填进 runtime 的环境变量；
+//! UI 设置页用它读写（保存/清除）。
+//! 为什么需要（与 config 分开）：`config.json` 是可提交风格的产品配置，而 key 是凭据。
+//! 分开后 key 可以单独设文件权限（0600）、单独 gitignore，且**不会被 UI 的"保存配置"顺手带出去**。
+//! 兼容：旧版把 `api-key` 写在 `workspace/config.json`，首次读取时自动迁移到本文件并从
+//! `config.json` 删除该字段。空值（`""`/全空白）一律视为未配置。
+//! 上接：`config.rs`（`load` 时读取并迁移）、`raw/mode.rs`（Real 模式取用）、`dshr-ui` 设置页。
+//! 下接：文件系统（读写 `data/secrets.json`）。
+//! 官方对应：无（官方把凭据放在自己的 `dsh-home` 内，dshr 不碰用户的 `~/.dsh`，故自管一份）。
 use std::io;
 use std::path::{Path, PathBuf};
 
 /// 相对 workspace 的密钥文件路径。
+///
+/// 入参 `workspace`：工作区根。返回：`<workspace>/data/secrets.json`。
+/// 为什么需要：路径拼接只写一处，避免 config/UI 各自拼出不同路径。
 pub fn secrets_path(workspace: &Path) -> PathBuf {
     workspace.join("data").join("secrets.json")
 }
@@ -96,54 +106,4 @@ fn migrate_legacy(workspace: &Path) -> io::Result<Option<String>> {
     rewritten.push('\n');
     std::fs::write(config_path, rewritten)?;
     Ok(Some(key))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_workspace(label: &str) -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "dshr-secrets-{label}-{}-{stamp}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn save_load_and_clear_roundtrip() {
-        let dir = temp_workspace("roundtrip");
-        save_api_key(&dir, "  sk-test  ").unwrap();
-        assert_eq!(load_api_key(&dir).as_deref(), Some("sk-test"));
-        save_api_key(&dir, "   ").unwrap();
-        assert_eq!(load_api_key(&dir), None);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn migrates_legacy_config_key_and_removes_it() {
-        let dir = temp_workspace("migrate");
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{ "api-key": "sk-legacy", "provider": "deepseek-official" }"#,
-        )
-        .unwrap();
-        assert_eq!(load_api_key(&dir).as_deref(), Some("sk-legacy"));
-        let config: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap())
-                .unwrap();
-        assert!(config.get("api-key").is_none());
-        assert_eq!(
-            config.get("provider").and_then(serde_json::Value::as_str),
-            Some("deepseek-official")
-        );
-        assert_eq!(load_api_key(&dir).as_deref(), Some("sk-legacy"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 }

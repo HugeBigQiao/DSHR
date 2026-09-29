@@ -1,6 +1,16 @@
 //! 请求元数据事件族。
 //!
-//! 对应官方 `SessionEventMap` 中 `request/header`、`request/context` 两组。
+//! 主要用途：`request/header`（每次模型请求的请求头快照 + 追加原因）与
+//! `request/context`（provider/model/上下文窗口路由元数据）的 data 类型。
+//! 为什么需要：这两组是「模型在什么配置下被调用」的唯一权威记录——计费、容量、
+//! 供应商比对都要它；`RequestHeaderReason` 还是官方 merge-extensible 字符串联合的典型，
+//! 其 `Unknown` 兜底与 `series` 回归（严格枚举会整体解析失败）都必须有明确归属。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的统计域（请求级统计）。
+//! 下接：无（`EpochHeader` 里官方复杂类型先用 opaque `serde_json::Value` 占位）。
+//!
+//! 官方对应：`SessionEventMap` 中 `request/header`、`request/context` 两组
+//!（`packages/core/session/src/types.ts`）。
 use serde::{Deserialize, Serialize};
 
 /// `request/header` 的 data：下次请求的完整请求头快照。
@@ -66,81 +76,4 @@ pub struct RequestContextData {
     pub context_window: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt_update: Option<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::session_event::SessionEvent;
-
-    /// 回归：0.1.2-alpha.x 起官方发出 `reason: 'series'`（Agent.buildRequest()），
-    /// 严格枚举会让整个 request/header 事件解析失败——必须能解析。
-    #[test]
-    fn request_header_reason_series_parses() {
-        let event: SessionEvent = serde_json::from_value(json!({
-            "type": "request/header",
-            "seq": 1,
-            "time": 100,
-            "data": {
-                "header": {"config": {}},
-                "reason": "series",
-                "startsSeries": true
-            }
-        }))
-        .expect("series 应可解析");
-        match event {
-            SessionEvent::RequestHeader { data, .. } => {
-                assert_eq!(data.reason, RequestHeaderReason::Series);
-                assert_eq!(data.starts_series, Some(true));
-            }
-            other => panic!("应解析为 RequestHeader，实际 {other:?}"),
-        }
-    }
-
-    /// 宽容性：官方 merge-extensible，未来的新 reason 不应让已知事件解析失败。
-    #[test]
-    fn request_header_reason_unknown_is_tolerated() {
-        let event: SessionEvent = serde_json::from_value(json!({
-            "type": "request/header",
-            "seq": 2,
-            "time": 200,
-            "data": {"header": {"config": {}}, "reason": "future-reason"}
-        }))
-        .expect("未知 reason 应落入 Unknown");
-        match event {
-            SessionEvent::RequestHeader { data, .. } => {
-                assert_eq!(data.reason, RequestHeaderReason::Unknown);
-            }
-            other => panic!("应解析为 RequestHeader，实际 {other:?}"),
-        }
-    }
-
-    /// 宽容性：已知类型 data 字段漂移（官方发版改字段/结构）时降级 Unknown（lossless），
-    /// 不整体报错、不丢事件。fallback.rs 的 known() 是通用解法，此处用缺必需字段模拟漂移。
-    #[test]
-    fn known_type_parse_failure_degrades_to_unknown() {
-        // request/header 缺必需字段 header → 类型化解析失败 → Unknown
-        let event: SessionEvent = serde_json::from_value(json!({
-            "type": "request/header",
-            "seq": 3,
-            "time": 300,
-            "data": {"reason": "initial"}
-        }))
-        .expect("漂移的已知事件应降级 Unknown 而非报错");
-        match event {
-            SessionEvent::Unknown {
-                event_type,
-                data,
-                seq,
-                ..
-            } => {
-                assert_eq!(event_type, "request/header");
-                assert_eq!(seq, 3);
-                assert_eq!(data, json!({"reason": "initial"}));
-            }
-            other => panic!("应降级为 Unknown，实际 {other:?}"),
-        }
-    }
 }

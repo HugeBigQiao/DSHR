@@ -1,6 +1,16 @@
 //! 工具事件族。
 //!
-//! 对应官方 `SessionEventMap` 中 `tool/call`、`tool/result` 两组
+//! 主要用途：`tool/call`、`tool/result` 两组核心工具事件的 data 类型，以及 PTC mode 的
+//! `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。
+//! 为什么需要：工具调用与结果是「模型做了什么」的事实来源（call↔result 按 callId 配对），
+//! 落库时对应 tool_calls 表，与消息/生命周期事件的消费方式不同；PTC 子调用虽属另一插件，
+//! 但同属「工具执行」语义，放一起可让配对规则只有一处出处。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold / store（工具统计与 file_ops 折叠）。
+//! 下接：`session_event/message.rs::Message`（结果消息）、
+//!       `crate::content_block::ContentBlock`（PTC 结果的模型可见内容）。
+//!
+//! 官方对应： `SessionEventMap` 中 `tool/call`、`tool/result` 两组
 //! 以及 PTC mode 的 `tool/ptc-dispatch`、`tool/ptc-dispatch-start`
 //! （`tool-workflow/*` 等扩展在工作流文件，由 fallback 兜住）。
 use serde::{Deserialize, Serialize};
@@ -42,11 +52,15 @@ pub struct ToolResultData {
 
 /// `tool/result` 的可选内部失败标识。
 /// 官方：packages/core/session/src/types.ts 的 SessionEventMap['tool/result'].error
-/// 用在 ToolResultData.error。
+/// 用在 ToolResultData.error。`reason`（原始面向用户的失败原因，位于模型内容之外）
+/// 为官方 0.1.7-rc.2 新增。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResultError {
     pub name: String,
     pub code: String,
+    /// 原始的用户可见失败原因；仅当消息 `isError: true` 时允许出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `tool/ptc-dispatch-start` 的 data：PTC mode 子调用开始执行。

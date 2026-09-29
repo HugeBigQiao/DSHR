@@ -3,10 +3,37 @@ name = "dshr-ui"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+# 默认走 GPU：tiny-skia 在弱机/高缩放下滚动会卡死（整窗 CPU 重绘扛不住），
+# 实测同一台机器 wgpu 流畅、tiny-skia 滚轮卡住；常驻代价见 DESIGN.md §12.20/§12.21。
+default = ["code-editor", "wgpu-renderer"]
+code-editor = ["dep:iced-code-editor"]
+# iced/wgpu 会同时打开 wgpu-bare 与 tiny-skia，iced_renderer 因此选
+# fallback::Renderer<wgpu, tiny_skia>——wgpu 可用就走 GPU，设备创建失败
+# （老驱动/远程桌面/虚拟机）自动退回 tiny-skia，不会白屏。
+# 想要最小常驻（无 GPU 初始化）时可关掉：`--no-default-features --features code-editor`
+# 或在代码里去掉这个 feature。
+wgpu-renderer = ["iced/wgpu"]
+
 [dependencies]
 # "advanced" feature：自定义 widget（覆盖式菜单 Popover）需要 iced::advanced；
 # "canvas" feature：窗口控制图标自绘（— □ ✕ 统一大小）。
-iced = { workspace = true, features = ["tokio", "advanced", "canvas"] }
+# Lightweight default: tiny-skia CPU renderer, no wgpu baseline.
+# Enable the optional `wgpu-renderer` feature to switch back to wgpu.
+iced = { workspace = true, features = [
+    "tokio",
+    "advanced",
+    "canvas",
+    "tiny-skia",
+    "crisp",
+    "web-colors",
+    "thread-pool",
+    "linux-theme-detection",
+    "x11",
+    "wayland",
+] }
+# Files page code/text editor (canvas-based, line numbers/folding/LSP).
+iced-code-editor = { path = "../../包/iced-code-editor/iced-code-editor", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # s3 真桥（DESIGN §11.4 / M3.6，2026-09 engine 下沉）：UI 只搬运命令/事件——

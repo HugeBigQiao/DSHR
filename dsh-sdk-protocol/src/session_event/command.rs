@@ -1,5 +1,15 @@
 //! 命令扩展事件族：`command/run`、`command/done`。
-//! 官方：packages/interaction/commands/src/types.ts。
+//!
+//! 主要用途：一次 slash 命令的开始与结算（按 commandId 配对）两组事件的 data 类型。
+//! 为什么需要：命令是「用户绕过模型直接触发的能力」，其成败必须与模型回合分开统计；
+//! 结构上刻意镜像 `tool/call`↔`tool/result` 的配对模式，单列文件便于对照两者的差异
+//!（命令有 `source_event_seq` 指向权威领域事件）。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（命令时间线）。
+//! 下接：无（只依赖 serde）。
+//!
+//! 官方对应：packages/interaction/commands/src/types.ts 的
+//! `SessionEventMap['command/run']` 与 `SessionEventMap['command/done']`。
 use serde::{Deserialize, Serialize};
 
 /// `command/run` 的 data：一次命令开始。

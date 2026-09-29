@@ -1,7 +1,20 @@
 //! 事件订阅：官方 client.ts 的 NotificationSubscription（subscribe / subscribeSessionTree）的 Rust 版。
 //!
+//! 主要用途：在广播事件流上提供「按会话树过滤」的消费端——`next()` / `try_next()` 两个
+//! 取值入口，配合 `SessionTree` 把 `subagent.started` 血缘边在客户端扩成会话树。
+//! 为什么需要：官方一个连接多订阅者、过滤在客户端做，所以「过滤」必须有独立类型承载；
+//! 它同时是 run()（receipt-to-idle）的等待原语（先订阅再 prompt，避免漏回执），
+//! 也是多会话 UI 只关心自己那棵树时的过滤点——放在 api.rs 里会让两个职责纠缠。
+//! 上接：`dsh-sdk-client` 的 api.rs::run（`Subscription::scoped` + `next`）；
+//!       `dshr-state` 的 raw 层（事件消费）。
+//! 下接：`dsh_sdk_protocol::rpc::Notification`（原始帧，解析由调用方做）、
+//!       tokio::sync::broadcast（底层通道）、`crate::error::Error`。
+//!
 //! 客户端侧过滤（官方同款）：会话树订阅按 subagent.started 血缘边在客户端扩展树，
 //! 不依赖服务端做任何过滤。
+//!
+//! 官方对应：packages/sdk/client/src/client.ts 的 `NotificationSubscription` /
+//! `NotificationSubscriptionImpl`（`next` / `tryNext`）与 `HarnessClient.subscribeSessionTree`。
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -11,6 +24,9 @@ use tokio::sync::broadcast;
 use crate::error::Error;
 
 /// 一个事件订阅：带可选会话树过滤的广播接收端。
+///
+/// 为什么需要：过滤状态（树）与通道游标必须一起移动——`next()` 每放行一条都可能
+/// 改写树结构（血缘边），拆成两个参数传来传去极易漏掉一次吸收，故包成一个类型。
 #[derive(Debug)]
 pub struct Subscription {
     rx: broadcast::Receiver<Notification>,
@@ -19,6 +35,9 @@ pub struct Subscription {
 }
 
 /// 客户端侧会话树：root + 从 subagent.started 血缘边扩展出的后代。
+///
+/// 为什么需要：官方不做服务端过滤，客户端只能靠 `subagent.started` 的父子边自己长树；
+/// 树只增不减（会话结束不影响归属），因此用 `HashSet` 无需额外遍历逻辑。
 #[derive(Debug, Default)]
 pub struct SessionTree {
     ids: HashSet<String>,
@@ -26,6 +45,12 @@ pub struct SessionTree {
 
 impl SessionTree {
     /// 以 root 会话建树。
+    ///
+    /// # 参数
+    /// - `root`：根会话 id（调用方要观察的那棵树）。
+    ///
+    /// # 返回
+    /// 只含 root 的树；后代靠 `absorb` 逐步长出来。
     pub fn new(root: &str) -> Self {
         let mut ids = HashSet::new();
         ids.insert(root.to_string());
@@ -33,6 +58,15 @@ impl SessionTree {
     }
 
     /// 吸收一条 subagent.started 血缘边；父在树内时把子纳入并返回 true。
+    ///
+    /// # 参数
+    /// - `parent` / `child`：血缘边的两端（来自通知的 parentSessionId / childSessionId）。
+    ///
+    /// # 返回
+    /// `true` = 父在树内、已把子纳入；`false` = 父不在树内（与本次订阅无关的边，忽略）。
+    ///
+    /// 为什么需要：父子边**到达顺序不保证**（孙可能先于子在广播里出现），
+    /// 故吸收必须是幂等且可重复的判断，而不是一次性建树。
     pub fn absorb(&mut self, parent: &str, child: &str) -> bool {
         if self.ids.contains(parent) {
             self.ids.insert(child.to_string());
@@ -43,6 +77,9 @@ impl SessionTree {
     }
 
     /// 会话是否在树内。
+    ///
+    /// # 返回
+    /// `true` = 该会话属于本订阅的会话树（根或已吸收的后代）。
     pub fn contains(&self, session_id: &str) -> bool {
         self.ids.contains(session_id)
     }
@@ -50,11 +87,25 @@ impl SessionTree {
 
 impl Subscription {
     /// 全量订阅。
+    ///
+    /// # 参数
+    /// - `rx`：广播接收端（通常来自 `HarnessClient::subscribe`/`take_events`）。
+    ///
+    /// # 返回
+    /// 不做任何过滤的订阅（所有通知放行）。
     pub fn new(rx: broadcast::Receiver<Notification>) -> Self {
         Self { rx, tree: None }
     }
 
     /// 会话树订阅（root + 血缘后代）。
+    ///
+    /// # 参数
+    /// - `rx`：广播接收端；`root`：根会话 id。
+    ///
+    /// # 返回
+    /// 只放行树内会话的 `session.event` / `session.status`（以及所有血缘边与其他通知，
+    /// 见 `passes`）。
+    ///
     /// 官方：client.ts 的 subscribeSessionTree。
     pub fn scoped(rx: broadcast::Receiver<Notification>, root: &str) -> Self {
         Self {
@@ -64,16 +115,23 @@ impl Subscription {
     }
 
     /// 等一条通过过滤的通知（awaitable next）。
+    ///
+    /// # 返回
+    /// 第一条通过过滤的 `Notification`（被过滤掉的会继续等，不返回）。
+    ///
+    /// # 错误
+    /// 通道关闭（runtime 已退出 → 广播发送端全丢）时返回 `Error::TransportClosed`
+    ///（此路径拿不到 exit code 与 stderr 尾部，故都是 None/空——完整信息在
+    /// `RuntimeStatus` 或 `Error::TransportClosed` 的原始变体里）。
+    ///
+    /// 为什么需要：调用方（api::run）要的是「下一条我关心的事件」，
+    /// 过滤循环不该在调用处重复实现。
     pub async fn next(&mut self) -> Result<Notification, Error> {
         loop {
-            let n = self
-                .rx
-                .recv()
-                .await
-                .map_err(|_| Error::TransportClosed {
-                    exit_code: None,
-                    stderr_tail: Vec::new(),
-                })?;
+            let n = self.rx.recv().await.map_err(|_| Error::TransportClosed {
+                exit_code: None,
+                stderr_tail: Vec::new(),
+            })?;
             if self.passes(&n) {
                 return Ok(n);
             }
@@ -81,6 +139,15 @@ impl Subscription {
     }
 
     /// 非阻塞取一条（tryNext 同款）；Empty → Ok(None)。
+    ///
+    /// # 返回
+    /// `Ok(Some(n))` = 立即可得且通过过滤；`Ok(None)` = 当前没有可取的（**不是**结束）。
+    ///
+    /// # 错误
+    /// 通道关闭 → `Error::TransportClosed`。
+    ///
+    /// 注意：被广播丢弃（`Lagged`，消费太慢）时按官方 lagging 语义**跳过**继续取，
+    /// 不报错——消费方应容忍事件缺口（WireLog 里有全量原文可回放）。
     pub fn try_next(&mut self) -> Result<Option<Notification>, Error> {
         loop {
             match self.rx.try_recv() {
@@ -96,7 +163,7 @@ impl Subscription {
                     return Err(Error::TransportClosed {
                         exit_code: None,
                         stderr_tail: Vec::new(),
-                    })
+                    });
                 }
             }
         }

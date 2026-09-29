@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 dsh-sdk-client = { path = "../dsh-sdk-client" }
 dsh-sdk-protocol = { path = "../dsh-sdk-protocol" }
+# engine 的 select_all：把「N 个 runtime 的通知流」合成一条，无需每 runtime 一个转发任务。
+futures = { workspace = true }
 # 加工库（DESIGN §11.2 事实表）：bundled = 编译内置 sqlite3（本机无 libsqlite3.so 开发库，
 # 需要 cc/gcc；libsqlite3-sys 会拉入 sqlite3 官方 C 源码一并编译）。
 rusqlite = { version = "0.40", features = ["bundled"] }

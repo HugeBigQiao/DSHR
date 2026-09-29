@@ -32,7 +32,7 @@ use dsh_sdk_client::subscription::Subscription;
 use dsh_sdk_protocol::requests::{InitializeParams, SdkPromptContentBlock, SessionPromptParams};
 
 // ① 拉起 runtime：node <已装 dsh 的 bin> --profile sdk
-//    dsh 安装 = npm install @deepseek-ai/dsh@0.1.5-alpha.1 --prefix <管理目录>（锁版本，勿用 latest）
+//    dsh 安装 = npm install @deepseek-ai/dsh@0.1.7-rc.2 --prefix <管理目录>（锁版本，勿用 latest）
 let config = HarnessSpawnConfig {
     command: "node".into(),
     args: vec![
@@ -91,7 +91,10 @@ client.shutdown().await?;
 
 已做：spawn / initialize / prompt / shutdown、id 配对 + 请求超时、事件通道、stderr 转发、
 typed errors 四类、dispose 阶梯（EOF→SIGTERM→SIGKILL，Windows 跳过 SIGTERM）、订阅 / 会话树
-scoping、run() receipt-to-idle、SdkEncodedImageBlock / reasoningEffort 透传、fake-runtime 集成测试
-（`tests/run_smoke.rs`，跑 `cargo test -p dsh-sdk-client --test run_smoke`）。
+scoping、run() receipt-to-idle、SdkEncodedImageBlock / reasoningEffort 透传、
+`runtime_status()`（退出码 + stderr 尾部的非阻塞查询）。
 
-未做：crate 发布（等 SDK 全做完 + 测试完，见 DESIGN.md §6.5）。
+⚠️ **测试已清空**（2026-09-29，原 `tests/run_smoke.rs` 一并删除），正按「各 crate 一个
+`tests/` 目录」重建——本 crate 的约定见 [`tests/_conventions.md`](tests/_conventions.md)。
+
+未做：crate 发布（等 SDK 全做完 + 测试重建完，见 DESIGN.md §12.4）。

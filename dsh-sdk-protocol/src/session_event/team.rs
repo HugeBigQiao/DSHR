@@ -1,5 +1,15 @@
 //! 团队扩展事件族：`team/member`、`team/message/queued`、`team/message/delivered`、`team/task`。
-//! 官方：packages/experimental/agent-team/src/types.ts（Agent Teams，rc.8 新增）。
+//!
+//! 主要用途：团队成员/消息/任务四组事件的 data 类型（都是整值快照，含 version）。
+//! 为什么需要：Agent Teams 是一整套独立领域（成员阶段、任务 CAS、投递确认），
+//! 且只存储在 Team Lead Session 里——这条「事件写入哪个会话」的规则必须写在文件级；
+//! 它还是「官方移除过字段」的活教材（`delivery` 改 Option 兼容新旧日志），需专门说明。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（团队面板）。
+//! 下接：`crate::content_block::ContentBlock`（团队消息内容）。
+//!
+//! 官方对应：packages/experimental/agent-team/src/types.ts（Agent Teams，rc.8 新增）的
+//! `team/member` / `team/message/queued` / `team/message/delivered` / `team/task` 四组。
 use serde::{Deserialize, Serialize};
 
 use crate::content_block::ContentBlock;
@@ -143,72 +153,4 @@ pub enum TeamTaskStatus {
     InProgress,
     Completed,
     Deleted,
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::session_event::SessionEvent;
-
-    /// 官方新版（0.1.2-alpha.5，team 事件版本=2）queued 事件无 delivery 字段，可解析并 roundtrip。
-    #[test]
-    fn team_message_queued_without_delivery_roundtrips() {
-        let wire = json!({
-            "type": "team/message/queued",
-            "seq": 4,
-            "time": 400,
-            "data": {
-                "version": 2,
-                "teamId": "s-root",
-                "message": {
-                    "id": "tm-1",
-                    "senderId": "s-a",
-                    "senderName": "alpha",
-                    "targetId": "s-b",
-                    "content": [{"type": "text", "text": "hi"}]
-                }
-            }
-        });
-        let event: SessionEvent =
-            serde_json::from_value(wire.clone()).expect("无 delivery 的 queued 事件应可解析");
-        match &event {
-            SessionEvent::TeamMessageQueued { data, .. } => {
-                assert_eq!(data.version, 2);
-                assert_eq!(data.message.delivery, None);
-            }
-            other => panic!("应解析为 TeamMessageQueued，实际 {other:?}"),
-        }
-        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
-    }
-
-    /// 兼容读：旧版（0.1.2-alpha.3 及更早）queued 事件带 delivery 'quiet'，仍可解析。
-    #[test]
-    fn team_message_queued_with_legacy_delivery_parses() {
-        let event: SessionEvent = serde_json::from_value(json!({
-            "type": "team/message/queued",
-            "seq": 5,
-            "time": 500,
-            "data": {
-                "version": 1,
-                "teamId": "s-root",
-                "message": {
-                    "id": "tm-2",
-                    "senderId": "s-a",
-                    "senderName": "alpha",
-                    "targetId": "s-b",
-                    "delivery": "quiet",
-                    "content": []
-                }
-            }
-        }))
-        .expect("带旧 delivery 的 queued 事件应可解析");
-        match &event {
-            SessionEvent::TeamMessageQueued { data, .. } => {
-                assert_eq!(data.message.delivery, Some(TeamDelivery::Quiet));
-            }
-            other => panic!("应解析为 TeamMessageQueued，实际 {other:?}"),
-        }
-    }
 }

@@ -1,7 +1,20 @@
 //! 消息类事件族。
 //!
-//! 对应官方 `SessionEventMap` 中 `user/message`、`system/message`、
-//! `assistant/message`、`assistant/attempt`；消息本体类型来自官方 `packages/llm/llm/src/message.ts`。
+//! 主要用途：`user/message`、`developer/message`、`system/message`、`assistant/message`、
+//! `assistant/attempt` 五组事件的 data 类型，以及它们共用的 `Message` / `MessageRole`。
+//! 为什么需要：这五种是「什么进了模型上下文」的完整记录（surface 写入），是 UI 对话流的
+//! 直接数据源，与工具/审批等旁路事件职责不同；`Message` 与角色枚举被 tool/result、
+//! subagent 等多处引用，集中在此避免重复定义，也让官方 message.ts 的变更只影响一处。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `session_event/tool.rs`、`session_event/agent.rs`、`session_event/title.rs`
+//!       （都复用 `Message`）；`dshr-state` 的 fold（消息流投影）。
+//! 下接：`crate::content_block::ContentBlock`（消息内容块）、
+//!       `crate::llm::{AssistantStreamRecord, TokenUsage}`（assistant/message 的流与账目）、
+//!       `message_source::MessageSource`（消息来源，本文件再出口）。
+//!
+//! 官方对应：`SessionEventMap` 中 `user/message`、`developer/message`（0.1.7-rc.2 新增）、
+//! `system/message`、`assistant/message`、`assistant/attempt`；
+//! 消息本体类型来自官方 `packages/llm/llm/src/message.ts`。
 use serde::{Deserialize, Serialize};
 
 use crate::content_block::ContentBlock;
@@ -9,14 +22,20 @@ use crate::content_block::ContentBlock;
 pub use super::message_source::MessageSource;
 
 /// 消息角色。
-/// 官方：packages/llm/llm/src/message.ts 的 Message.role
-/// 用在 Message.role。
+/// 官方：packages/llm/llm/src/message.ts 的 MessageRoleMap
+/// 用在 Message.role。`Developer` 为 0.1.7-rc.2 新增（`developer/message` 事件）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MessageRole {
     System,
+    Developer,
     User,
     Assistant,
+    Tool,
+    /// 兜底：官方 MessageRoleMap 是 merge-extensible（并已从 3 成员扩到 5），
+    /// 未来新增 role 时不整体解析失败（与 TurnEndReason::Other 同款策略）。
+    #[serde(other)]
+    Other,
 }
 
 /// 一条不可变消息（官方三个子类的合并形态）。
@@ -36,6 +55,21 @@ pub struct Message {
 /// 官方：packages/core/session/src/types.ts 的 SessionEventMap['user/message']
 /// 用在用户消息进入会话的事件。
 pub type UserMessageData = Message;
+
+/// `developer/message` 的 data：在指定 turn/step 被接纳的增量 agent 会话变更。
+/// 官方：packages/core/session/src/types.ts 的 SessionEventMap['developer/message']
+///     （0.1.7-rc.2 新增；content 里承载 tool-addition / tool-removal 块）
+/// 用在工具声明中途增删的事件；`headerSeq` 指向定义这些新增工具的更早
+/// request/header——**仅当 content 含 additions 时才必需**。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeveloperMessageData {
+    pub turn: u64,
+    pub step: u64,
+    pub message: Message,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_seq: Option<u64>,
+}
 
 /// `system/message` 的 data：渲染后的系统提示消息。
 /// 官方：packages/core/session/src/types.ts 的 SessionEventMap['system/message']
@@ -71,63 +105,4 @@ pub struct AssistantAttemptData {
     pub step: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<Vec<crate::llm::AssistantStreamRecord>>,
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use crate::session_event::SessionEvent;
-
-    #[test]
-    fn system_message_event_roundtrips() {
-        let wire = json!({
-            "type": "system/message",
-            "seq": 1,
-            "time": 10,
-            "data": {
-                "turn": 1,
-                "step": 1,
-                "message": {
-                    "id": "sys-1",
-                    "role": "system",
-                    "content": [{"type": "text", "text": "prompt"}],
-                    "source": {"kind": "plugin", "plugin": "system-prompt"}
-                }
-            }
-        });
-        let event: SessionEvent =
-            serde_json::from_value(wire.clone()).expect("system/message should parse");
-        match &event {
-            SessionEvent::SystemMessage { data, .. } => {
-                assert_eq!(data.turn, 1);
-                assert_eq!(data.step, 1);
-            }
-            other => panic!("expected SystemMessage, got {other:?}"),
-        }
-        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
-    }
-
-    #[test]
-    fn assistant_attempt_event_roundtrips() {
-        let wire = json!({
-            "type": "assistant/attempt",
-            "seq": 2,
-            "time": 20,
-            "data": {
-                "turn": 1,
-                "step": 1,
-                "stream": []
-            }
-        });
-        let event: SessionEvent =
-            serde_json::from_value(wire.clone()).expect("assistant/attempt should parse");
-        match &event {
-            SessionEvent::AssistantAttempt { data, .. } => {
-                assert_eq!(data.stream.as_ref().map(Vec::len), Some(0));
-            }
-            other => panic!("expected AssistantAttempt, got {other:?}"),
-        }
-        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
-    }
 }

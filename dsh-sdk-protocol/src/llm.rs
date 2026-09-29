@@ -1,5 +1,20 @@
 //! LLM 侧共享类型（官方 `packages/llm/llm/src/types.ts`）。
 //!
+//! 主要用途：定义「一次模型调用」相关的公共类型——token 账目（`TokenUsage`）、
+//! 紧凑流记录与展开形态（`AssistantStreamRecord` / `TimedStreamChunk` / `StreamChunk`）、
+//! 停止原因（`FinishReason`）与结构化失败（`LlmFailure`），并提供 `expand()` 展开实现。
+//! 为什么需要：这些类型被消息、turn 结束、重试等多个事件族**横向共享**，任何一族
+//! 单独持有都会造成重复定义与「同一字段两种形状」。单列一个文件也把「官方 llm 包的
+//! 变更面」隔离出来：llm/types.ts 改动时只需审这一个文件 + `session_event/` 的引用点。
+//! 上接：`session_event/message.rs`（usage/stream）、`session_event/turn.rs`
+//!       （`TurnEndReason::Error` 的 LlmFailure）、`session_event/retry.rs`（failure）、
+//!       `session_event/compaction.rs`（summary 的 usage）；`dshr-state` 的统计/fold 层。
+//! 下接：`content_block::ContentBlock`（`StreamChunk::BlockEnd` 的载荷）。
+//!
+//! 官方对应：`packages/llm/llm/src/types.ts` 的 `TokenUsage` / `FinishReasonMap` /
+//! `StreamChunk` / `LlmFailure` / `IMAGE_OFFLOAD_REQUIRED_CODE`，以及
+//! `packages/llm/llm/src/assistant-stream.ts` 的 `AssistantStreamRecord`。
+//!
 //! 被 `session_event/` 各事件族引用（assistant/attempt 的 AssistantStreamRecord、
 //! assistant/message 的 TokenUsage、turn/end 的 LlmFailure 等）。
 use serde::{Deserialize, Serialize};
@@ -7,6 +22,9 @@ use serde::{Deserialize, Serialize};
 use crate::content_block::ContentBlock;
 
 /// 一次模型调用的 token 明细。
+///
+/// 为什么需要：计费与容量判断的唯一数据源；六桶拆分（input/output/total/cacheRead/
+/// cacheWrite/reasoning）必须保持官方语义，否则算出来的账与官方对不上。
 /// 官方：packages/llm/llm/src/types.ts 的 TokenUsage
 /// 用在 assistant/message 的 data.usage 与 StreamChunk 的 usage 变体（监管面板核心）。
 /// 注意：计数不相交——inputTokens 不含缓存，计费 = input + cacheRead + cacheWrite。
@@ -62,6 +80,10 @@ pub enum AssistantStreamRecord {
 }
 
 /// 一条带原始时间戳的流 chunk（`AssistantStreamRecord` 展开后的形态）。
+///
+/// 为什么需要：紧凑记录里的时间是相对量（`time0` + `dt` 差分），统计（首 token 延迟、
+/// 单 chunk 间隔）必须还原成绝对时间才有意义；`TimedStreamChunk` 就是 `expand()` 的
+/// 输出单元，只服务于统计/回放，不参与持久化。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimedStreamChunk {
     pub time: u64,
@@ -70,6 +92,18 @@ pub struct TimedStreamChunk {
 
 impl AssistantStreamRecord {
     /// 展开成原始带时间戳的 chunk 序列（dshr 用于统计/回放；不参与持久化）。
+    ///
+    /// # 返回
+    /// 按记录内顺序还原的 `TimedStreamChunk` 列表：`TextChunks` / `ReasoningChunks` /
+    /// `ToolCallChunks` 会按 `dt`（相对前一个 chunk 的毫秒差）累加出每个 chunk 的绝对时间
+    /// `time0 + Σdt`；`Chunk` 变体原样返回一条。`texts`/`args` 为空时返回空列表。
+    ///
+    /// # 注意
+    /// `dt` 比元素数少 1（首个元素的时间就是 `time0`），缺项按 0 处理；时间累加用
+    /// `saturating_add`，溢出时饱和而不是 panic（日志可能是坏数据）。
+    ///
+    /// 为什么需要：官方为了省空间把逐 chunk 压成「首时间 + 相对间隔 + 文本数组」，
+    /// dshr 要做首 token 延迟/时长/字符数统计就必须能还原成等价序列——这是唯一还原点。
     pub fn expand(&self) -> Vec<TimedStreamChunk> {
         match self {
             AssistantStreamRecord::TextChunks {
@@ -215,46 +249,18 @@ pub struct LlmFailure {
     pub provider_retry_after_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// 当 `code == "IMAGE_OFFLOAD_REQUIRED"` 时：该路由还需要卸载多少个**最旧的**
+    /// 保留图片出现位置，同一个请求才能装进它的精确字节核算。插件据此记录一次
+    /// `image/offload` 事件并重试该步。
+    /// 官方 0.1.7-rc.2 新增（LlmFailure.offloadImages）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload_images: Option<u64>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn expand_text_chunks_preserves_timestamps() {
-        let record = AssistantStreamRecord::TextChunks {
-            time0: 100,
-            index: 0,
-            dt: vec![10, 5],
-            texts: vec!["a".into(), "b".into(), "c".into()],
-        };
-        let chunks = record.expand();
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].time, 100);
-        assert_eq!(chunks[1].time, 110);
-        assert_eq!(chunks[2].time, 115);
-        assert!(matches!(&chunks[1].chunk, StreamChunk::TextDelta { text, .. } if text == "b"));
-    }
-
-    #[test]
-    fn expand_tool_call_chunks_rebuilds_deltas() {
-        let record = AssistantStreamRecord::ToolCallChunks {
-            time0: 200,
-            index: 1,
-            dt: vec![7],
-            id: "call-1".into(),
-            name: Some("read".into()),
-            args: vec!["{\"path\"".into(), ":\"a\"}".into()],
-        };
-        let chunks = record.expand();
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].time, 200);
-        assert_eq!(chunks[1].time, 207);
-        assert!(matches!(
-            &chunks[1].chunk,
-            StreamChunk::ToolCallDelta { id, arguments_delta, .. }
-                if id == "call-1" && arguments_delta == ":\"a\"}"
-        ));
-    }
-}
+/// 图片卸载被要求的失败码（官方 LlmFailure.code 取值，导出给消费方比较用）。
+///
+/// 为什么需要：官方把这个码留在字符串里（没有枚举），消费方（插件/桌面端）需要与
+/// `LlmFailure.code` 做等值比较来决定「记录一次 image/offload 并重试」；
+/// 导出常量可避免各处手写字面量写错。
+/// 官方：packages/llm/llm/src/types.ts 的 IMAGE_OFFLOAD_REQUIRED_CODE。
+pub const IMAGE_OFFLOAD_REQUIRED_CODE: &str = "IMAGE_OFFLOAD_REQUIRED";

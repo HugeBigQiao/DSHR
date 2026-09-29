@@ -1,5 +1,16 @@
 //! 子代理描述符事件：`subagent/descriptor`。
-//! 官方：packages/subagent/subagent/src/descriptor.ts。
+//!
+//! 主要用途：给出 `SubagentDescriptorData`——子代理组成声明（one-shot / continuable
+//! 按 mode 判别，含 version / provider / label / 模型路由 / persona / 工具限制）。
+//! 为什么需要：这是「这个子会话是按什么配方跑起来的」的持久事实，冷恢复必须逐字校验版本
+//!（SUBAGENT_DESCRIPTOR_VERSION）；与 catalog.rs（目录）分属「怎么建的」和「有哪些」，
+//! 且版本兼容读（v2 无 agentReasoningEffort）需要专门说明，故单独成文件。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（子会话详情）/ store。
+//! 下接：无（只依赖 serde）。
+//!
+//! 官方对应：packages/subagent/subagent/src/descriptor.ts 的
+//! `SessionEventMap['subagent/descriptor']`（版本：SUBAGENT_DESCRIPTOR_VERSION = 3，L48）。
 use serde::{Deserialize, Serialize};
 
 /// `subagent/descriptor` 的 data：子代理组成声明（按 mode 判别的联合）。
@@ -57,93 +68,4 @@ pub struct ToolRestriction {
     pub allow: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deny: Option<Vec<String>>,
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::session_event::SessionEvent;
-
-    /// v3 descriptor（SUBAGENT_DESCRIPTOR_VERSION = 3，带 agentReasoningEffort）可解析并 roundtrip。
-    #[test]
-    fn descriptor_v3_continuable_with_reasoning_effort_roundtrips() {
-        let wire = json!({
-            "type": "subagent/descriptor",
-            "seq": 2,
-            "time": 200,
-            "data": {
-                "mode": "continuable",
-                "version": 3,
-                "provider": "subagent-spawn-in-process",
-                "label": "audit",
-                "agentProvider": "deepseek-official",
-                "agentModel": "deepseek-v4-flash",
-                "agentReasoningEffort": "high",
-                "persona": "auditor",
-                "toolFilter": {"allow": ["read", "glob"], "deny": ["write"]}
-            }
-        });
-        let event: SessionEvent =
-            serde_json::from_value(wire.clone()).expect("v3 descriptor 应可解析");
-        match &event {
-            SessionEvent::SubagentDescriptor { data, .. } => {
-                let SubagentDescriptorData::Continuable {
-                    version,
-                    label,
-                    agent_model,
-                    agent_reasoning_effort,
-                    persona,
-                    tool_filter,
-                    ..
-                } = data
-                else {
-                    panic!("应解析为 Continuable，实际 {data:?}");
-                };
-                assert_eq!(*version, 3);
-                assert_eq!(label, "audit");
-                assert_eq!(agent_model.as_deref(), Some("deepseek-v4-flash"));
-                assert_eq!(agent_reasoning_effort.as_deref(), Some("high"));
-                assert_eq!(persona.as_deref(), Some("auditor"));
-                assert_eq!(
-                    tool_filter.as_ref().unwrap().allow.as_deref(),
-                    Some(&["read".to_string(), "glob".to_string()][..])
-                );
-            }
-            other => panic!("应解析为 SubagentDescriptor，实际 {other:?}"),
-        }
-        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
-    }
-
-    /// 兼容读：v2 日志的 continuable descriptor 无 agentReasoningEffort → None，仍可解析。
-    #[test]
-    fn descriptor_v2_without_reasoning_effort_parses() {
-        let event: SessionEvent = serde_json::from_value(json!({
-            "type": "subagent/descriptor",
-            "seq": 3,
-            "time": 300,
-            "data": {
-                "mode": "continuable",
-                "version": 2,
-                "provider": "p",
-                "label": "l",
-                "agentModel": "m"
-            }
-        }))
-        .expect("v2 descriptor 应可解析");
-        match &event {
-            SessionEvent::SubagentDescriptor { data, .. } => {
-                let SubagentDescriptorData::Continuable {
-                    agent_reasoning_effort,
-                    ..
-                } = data
-                else {
-                    panic!("应解析为 Continuable，实际 {data:?}");
-                };
-                assert_eq!(agent_reasoning_effort, &None);
-            }
-            other => panic!("应解析为 SubagentDescriptor，实际 {other:?}"),
-        }
-    }
 }

@@ -1,7 +1,23 @@
 //! 进程生命周期：把 runtime 拉起来，管收尸（dispose 阶梯）。
 //!
+//! 主要用途：`RuntimeProcess::spawn` 起 node 子进程并接管三根管道（stdin/stdout 交出去、
+//! stderr 转成通道 + 有界尾部）、`dispose` 按 EOF → [SIGTERM] → SIGKILL 阶梯收尸；
+//! `RuntimeStatus` 提供 exit code 与 stderr 尾部给上层构造 `TransportClosed`。
+//! 为什么需要：进程生死与协议对话是两种完全不同的失败模式（OOM/挂死/不退 vs 帧畸形），
+//! 混在一个文件后「读循环」会同时承担 I/O 与 wait/kill；分开才能让 transport 只管管道，
+//! 也才能让 dispose 阶梯（Windows 跳过 SIGTERM 这类平台差异）有唯一落点。
+//! 上接：`dsh-sdk-client` 的 client.rs::spawn（组装本模块与 transport）；
+//!       `dshr-state` 的 raw 层（填 `HarnessSpawnConfig`：DSH_HOME/DSH_CWD/锁版本命令）。
+//! 下接：tokio::process（`Command` / `Child`）、`crate::error::Error`。
+//!
 //! 只管"进程"本身（spawn / stderr 任务 / exit 监控 / dispose），
 //! 不管协议——管道交出去后由 transport 负责对话。
+//!
+//! 官方对应：packages/sdk/client/src/launch.ts 的 `RuntimeProcessOptions`（= `HarnessSpawnConfig`；
+//! 其 `command`/`args` 在官方由同文件的 `resolveDshLaunch` 解析出，dshr 侧由 dshr-state 的
+//! runtime 层负责）、client.ts L211-221 的 `HarnessClient.start()`（官方在这里直接
+//! `node:child_process` spawn，本文件把它拆出来）、packages/sdk/client/src/dispose.ts 的
+//! `disposeRuntimeProcess`（= `RuntimeProcess::dispose`，由 client.ts 的 `performClose()` L404 调用）。
 use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -20,6 +36,10 @@ const STDERR_TAIL_MAX: usize = 40;
 
 /// 共享运行状态：exit code + bounded stderr 尾部。
 /// transport 的 EOF 用它构造 TransportClosedError（官方 client.ts L39-46 的语义）。
+///
+/// 为什么需要：stderr 尾部与 exit code 由两个后台任务写、由读循环与 dispose 读，
+/// 必须共享（`Arc`）并在锁后提供快照——把 stderr 直接丢掉的话，
+/// runtime 崩溃时错误信息就只剩一个退出码。
 #[derive(Debug, Default)]
 pub struct RuntimeStatus {
     exit_code: Mutex<Option<i32>>,
@@ -37,17 +57,34 @@ impl RuntimeStatus {
     }
 
     /// 当前 exit code（None = 尚未退出）。
+    ///
+    /// # 返回
+    /// `Some(code)` = 进程已退出（code 为 None 表示被信号终止）；`None` = 仍在运行或监控未及更新。
     pub fn exit_code(&self) -> Option<i32> {
         *self.exit_code.lock().unwrap()
     }
 
     /// 当前 stderr 尾部（bounded，崩溃排查用）。
+    ///
+    /// # 返回
+    /// 按时间顺序的最近若干行（上限 `STDERR_TAIL_MAX`，更早的被丢弃），克隆出的快照。
+    ///
+    /// 为什么需要：`TransportClosed` 只带这个尾部——它是 runtime 挂掉时唯一可读的诊断信息。
     pub fn stderr_tail(&self) -> Vec<String> {
         self.stderr_tail.lock().unwrap().iter().cloned().collect()
     }
 }
 
 /// 启动 runtime 进程的配置。
+///
+/// 为什么需要：把「起哪个进程、在哪个目录、带什么环境」与「超时/收尸节奏」收成一个
+/// 可序列化心智的值对象——上层（dshr-state 的 runtime/config 层）负责填，
+/// 本层只负责用；三个超时字段都对应官方的可配置项，默认值由上层决定，
+/// 这里**不设默认**（避免两层各有一套默认值）。
+/// 官方对应：packages/sdk/client/src/launch.ts 的 `RuntimeProcessOptions`
+///（`command` / `args` / `cwd` / `environment` / `requestTimeoutMs` / `disposeEofGraceMs`
+/// / `disposeGraceMs`；Rust 侧把 `cwd`/`environment` 先求值成 `current_dir`/`env`，
+/// 且不 port 官方的 `initializeTimeoutMs` / `shutdownTimeoutMs` 与 `description`）。
 #[derive(Debug)]
 pub struct HarnessSpawnConfig {
     pub command: String,
@@ -66,6 +103,10 @@ pub struct HarnessSpawnConfig {
 }
 
 /// 一个已启动的 runtime 进程。
+///
+/// 为什么需要：spawn 之后必须**同时**管住三件事——子进程句柄（收尸用）、stderr 读取
+///（不读会把子进程堵死）、退出监控（拿 exit code）；三者生命周期一致，绑在一个类型里
+/// 才能靠 Drop/显式 dispose 保证不泄漏。注意 `dispose` 消费 `self`：收尸后本类型不可再用。
 #[derive(Debug)]
 pub struct RuntimeProcess {
     /// 共享句柄：dispose 与 exit 监控任务都要轮询/kill。
@@ -82,6 +123,10 @@ impl RuntimeProcess {
     /// 处理：配置一个独立的 runtime 子进程，三根 stdio 全部 piped（不走终端走管道）；
     ///       stderr 每行 → 共享状态尾部 + mpsc 通道；exit 轮询 → 记录退出码。
     /// 生成：进程句柄 + stdin/stdout 管道 + stderr 行通道 + 共享状态。
+    /// 错误：`Error::Io`（command 不存在/无权限/current_dir 非法——注意 **node 缺失也走这里**，
+    ///       当前不做 portable node 自动安装）。返回的元组字段顺序即本函数的契约：
+    ///       调用方（`HarnessClient::spawn`）必须把 stdin/stdout 立刻交给 transport，
+    ///       否则管道缓冲会写满并卡住子进程。
     pub async fn spawn(
         config: HarnessSpawnConfig,
     ) -> Result<
@@ -164,6 +209,18 @@ impl RuntimeProcess {
     /// 2. POSIX 发 SIGTERM，Windows 跳过（官方同款：Node 两信号都映射 TerminateProcess）；
     /// 3. 强杀（Windows TerminateProcess / POSIX SIGKILL），等到真实退出。
     /// 任一级在窗口内退出即成功返回。
+    ///
+    /// # 参数
+    /// - `eof_grace_ms`：第 1 级的等待窗口（官方 `disposeEofGraceMs`）。
+    /// - `kill_grace_ms`：SIGTERM 后与强杀后的确认窗口（官方 `disposeGraceMs`）。
+    ///
+    /// # 返回 / 错误
+    /// 任一级确认退出即 `Ok(())`；只有在**强杀后**仍未退出才 `Error::Io(TimedOut)`
+    ///（此时进程可能已僵死，调用方只能认账）。
+    ///
+    /// 为什么需要：分层收尸是「不杀错、也不留孤儿」的唯一办法——直接 SIGKILL 会丢
+    /// runtime 的落盘收尾，无脑等待又会让 UI 挂死；消费 `self` 是为了在类型上保证
+    /// 收尸后不会再用已死的句柄发请求。
     pub async fn dispose(self, eof_grace_ms: u64, kill_grace_ms: u64) -> Result<(), Error> {
         let Self {
             child,

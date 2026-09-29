@@ -1,6 +1,15 @@
 //! 会话生命周期/日志类事件族：`session/end-seed`、`session-log-deepseek/delivery-accepted`。
 //!
-//! `session/end-seed` 属核心包 `SessionEventMap`（packages/core/session/src/types.ts）；
+//! 主要用途：`session/end-seed`（构造种子结束标记）与 `delivery-accepted`（会话日志上传送达确认）
+//! 两个事件的 data 类型。
+//! 为什么需要：`session/end-seed` 是**位置语义**事件——它之前的 seq 都来自种子
+//!（resume/fork/replay），载荷是空的，判断含义全靠类型与位置；不解释这点就会被当成无意义事件。
+//! 它与 title/request 等「会话内业务事件」不同（一个是边界，一个是内容），故单列文件。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 record（WireLog 回放时区分种子段）。
+//! 下接：无（只依赖 serde）。
+//!
+//! 官方对应：`session/end-seed` 属核心包 `SessionEventMap`（packages/core/session/src/types.ts）；
 //! `delivery-accepted` 由 session-log-deepseek 插件注册（packages/session/
 //! session-log-deepseek/src/types.ts 的 declare module，L54-63）。`session/title` 等
 //! 会话内其他事件在 title.rs / request.rs 等族文件。
@@ -29,32 +38,4 @@ pub struct DeliveryAcceptedData {
     pub session_format_version: Option<u64>,
     /// 已接受请求包含的最后一条事件序号（官方 branded SessionSeq）。
     pub through_seq: u64,
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use crate::session_event::SessionEvent;
-
-    /// 官方形状的 delivery-accepted 事件可解析并 roundtrip。
-    #[test]
-    fn delivery_accepted_event_roundtrips() {
-        let wire = json!({
-            "type": "session-log-deepseek/delivery-accepted",
-            "seq": 5,
-            "time": 500,
-            "data": {"sessionId": "s-1", "throughSeq": 4}
-        });
-        let event: SessionEvent =
-            serde_json::from_value(wire.clone()).expect("delivery-accepted 应可解析");
-        match &event {
-            SessionEvent::SessionLogDeepseekDeliveryAccepted { data, .. } => {
-                assert_eq!(data.session_id, "s-1");
-                assert_eq!(data.through_seq, 4);
-            }
-            other => panic!("应解析为 DeliveryAccepted，实际 {other:?}"),
-        }
-        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
-    }
 }

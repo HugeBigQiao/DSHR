@@ -1,7 +1,22 @@
 //! 中间对话：消息流 + 统计行 + composer（对标官方 ChatView + StatsLine + composer dock）。
 //! s3：消息/统计全部来自真实快照（model.rs 映射）；工具卡展开状态在 App 按 seq 持有，
-//! 快照整体刷新不丢。流式 token 渲染不在本步（folder 按 DESIGN §11.3 忽略 chunk）——
+//! 快照整体刷新不丢。流式 token 渲染不在本步（folder 按 DESIGN.md §8.3 忽略 chunk）——
 //! running 期间状态行以 "…" 示意。
+//!
+//! 主要用途：渲染对话区三块——可滚动的消息流（按 `MsgKind` 分形态）、composer（多行编辑器 +
+//! 状态/统计 + 圆形发送箭头）、以及底部一行「会话短 id + 状态 + 状态行」。
+//! 为什么需要：它是唯一把「消息种类 → 视觉形态」定下来的地方（用户行/assistant 气泡/
+//! reasoning 灰字/工具卡/notice 小字），也是唯一处理「Enter 即发送」这条交互契约的地方
+//! （见下方 composer 处的详细说明）；这些形态与 iced `text_editor` 的行为细节耦合，集中在一个
+//! 文件里便于与官方 ChatView/StatsLine 逐条对齐。
+//! 它约束：本文件不持有任何状态（全部读 `App`），交互靠发 `task::Message`；消息正文一个字都
+//! 不改（快照里的文本直接上屏）。
+//! 上接：`task::view`（中间列）。
+//! 下接：`app::App`（`data.chat`/`composer`/`expanded_tools`/字号）、`model`（MsgView/ChatStatus/
+//! stats_line/short_id）、`theme`、`dshr_state::snapshot::StreamSummary`。
+//! 官方对应：`packages/client/ui-chat/src/client/chat/ChatView.tsx` 的 `ChatView`；
+//! 消息行对应 `.../chat/MessageItem.tsx`、`.../chat/ReasoningRow.tsx`、工具节点
+//! `.../conversation-nodes/tool.ts`；统计行对应 `.../chat/StatsPills.tsx`。
 use iced::widget::{Space, button, column, container, row, scrollable, text, text_editor};
 use iced::{Element, Length};
 
@@ -12,6 +27,11 @@ use crate::theme;
 use dshr_state::snapshot::StreamSummary;
 
 /// 渲染对话区。
+///
+/// 为什么需要：对话区自上而下的顺序（消息流占满剩余高度 → 底部状态行 → composer 固定在下）
+/// 与「消息流可滚动、其余不滚」的分工只在这里表达；composer 的 Enter 拦截也在这里（见下方注释）。
+/// 入参/出参：`app` 提供 `data.chat`（消息/统计/状态/标题）、`composer`（草稿）与字号/调色板；
+/// 返回中间列 `Element<Message>`。
 pub fn view<'a>(app: &'a App) -> Element<'a, Message> {
     let p = app.palette();
     let chat = &app.data.chat;
@@ -82,6 +102,10 @@ pub fn view<'a>(app: &'a App) -> Element<'a, Message> {
 }
 
 /// 状态文字：running 带 "…"（流式期间示意；token 级渲染不在本步）。
+///
+/// 为什么需要：`ChatStatus::label()` 是各处共用的短标签，但对话区需要额外表达「正在产出」，
+/// 所以在此加后缀而不改 `label()`（底部图标栏等处应保持干净短标签）。
+/// 入参/出参：`status` 为当前状态；返回展示文案。
 fn status_text(status: ChatStatus) -> String {
     match status {
         ChatStatus::Running => "running…".to_string(),
@@ -90,11 +114,20 @@ fn status_text(status: ChatStatus) -> String {
 }
 
 /// 状态颜色：统一走 design 系统（theme.rs Palette::status_color）。
+///
+/// 为什么需要：状态色要在对话区/侧边栏状态点/底部图标栏三处一致，所以只做一次转发，
+/// 避免各页各自 match 状态取色（那种分散迟早会不一致）。
+/// 入参/出参：`p` 为调色板、`status` 为当前状态；返回状态色。
 fn status_color(p: theme::Palette, status: ChatStatus) -> iced::Color {
     p.status_color(status)
 }
 
 /// 按消息种类渲染（官方形态：名字行 + 内容/气泡/卡片）。
+///
+/// 为什么需要：`MsgKind` 是快照的判别式，视觉形态必须与它一一对应；把这个 match 写在唯一处，
+/// 消息流才不会有「同一个 kind 两种长相」。
+/// 入参/出参：`app` 提供调色板/字号/工具卡展开集，`msg` 为该行视图模型；返回该行
+/// `Element<Message>`。Tool 行缺 `tool` 内容时退化为「(工具)」占位（不会 panic）。
 fn render_message<'a>(app: &'a App, msg: &'a MsgView) -> Element<'a, Message> {
     let p = app.palette();
     match msg.kind {
@@ -135,6 +168,8 @@ fn render_message<'a>(app: &'a App, msg: &'a MsgView) -> Element<'a, Message> {
 }
 
 /// 时间标签（caption 小字；快照映射时已格式化为 UTC HH:mm）。
+///
+/// 入参/出参：`app` 只提供字号/调色板，`msg` 提供已格式化好的 `time_label`；返回小字 Element。
 fn time<'a>(app: &'a App, msg: &'a MsgView) -> Element<'a, Message> {
     text(&msg.time_label)
         .size(app.fs(10))
@@ -143,6 +178,11 @@ fn time<'a>(app: &'a App, msg: &'a MsgView) -> Element<'a, Message> {
 }
 
 /// v3 流记录摘要（首 token 延迟 / 时长 / 文本量）；真正的逐 token 直播需要上游 live 通知。
+///
+/// 为什么需要：逐 chunk 内容按 DESIGN.md §8.3 不保留，但「这次流有多长、首 token 等多久」
+/// 是排障/体感的关键信息，所以用一行摘要替代逐 token 渲染。
+/// 入参/出参：`stream` 为快照里的流摘要；返回由 ` · ` 连接的单行小字
+/// （各段只在数据存在时出现——缺时间戳就只显示 chunk 数）。
 fn stream_caption<'a>(app: &'a App, stream: &StreamSummary) -> Element<'a, Message> {
     let p = app.palette();
     let mut parts = vec![format!("流记录 {} chunks", stream.chunks)];
@@ -169,6 +209,12 @@ fn stream_caption<'a>(app: &'a App, stream: &StreamSummary) -> Element<'a, Messa
 
 /// 工具摘要卡片（官方工具节点：l1 边框圆角 + 名称着色 + 展开；内容 = 快照 ToolItem：
 /// result 摘要 + diffs 行数；展开态在 App 按 seq 持有，快照刷新不丢）。
+///
+/// 为什么需要：工具调用是长对话里最多的行，默认收起只留「名称 + 失败标 + 耗时 + Δ 行数」，
+/// 既能让用户扫读，也能在出错时一眼看到红色；展开态存 App（按 seq 索引）而不是本地，是因为
+/// 快照每事件整份替换、行会被重建。
+/// 入参/出参：`seq` 为该行稳定序号（展开集索引）、`tool` 为快照里配对好的工具项
+/// （result 为 None = 仍在运行）；返回工具卡 `Element<Message>`（按钮发 `ToggleTool(seq)`）。
 fn tool_card<'a>(
     app: &'a App,
     seq: u64,

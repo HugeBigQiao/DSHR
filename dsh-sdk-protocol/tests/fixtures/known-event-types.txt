@@ -1,0 +1,75 @@
+# 官方已知会话事件全集的**快照**（59 种）。
+#
+# 真源：deepseek-harness/packages/core/session/src/known-event-types.ts
+#       （上游 `scripts/gen-persistence-catalog.ts` 生成物，勿手改）
+# 版本：官方 runtime 锁 0.1.7-rc.2（见 dshr/config.json 的 dsh-version）
+# 取出：在仓库根跑 `node scripts/compare-session-events.mjs`（报告写 scripts/out/session-event-diff.json）
+#       当前结论：官方 59 = dshr 59 = 共同 59，0 差异。
+#
+# 为什么要在这个 crate 里再放一份快照：脚本对的是**官方真源**（需要 deepseek-harness 克隆），
+# 而快照对的是 `cargo test`——这样「枚举声明的类型集合被改动」这件事故在**只 clone 了 dshr**
+# 的机器上也能立刻被抓住（tests/event_catalog.rs 会逐行比对）。
+#
+# 更新时机：官方发版 → 完成协议同步（枚举 + fallback 分发 + meta 四方法）→ 重跑脚本 → 用
+# 官方新列表刷新本文件 → 同步 dshr/README.md 与 DESIGN.md §4.2 里写的「59 种」。
+#
+# 格式：每行一个事件类型（已排序）；# 开头为注释，空行忽略。
+agent-preset/selected
+agent/inbox/spliced
+approval/asked
+approval/decided
+approval/policy
+assistant/attempt
+assistant/message
+command/done
+command/run
+compaction/end
+compaction/prune
+compaction/start
+compaction/summary
+deliverables/presented
+developer/message
+feedback/message-delete
+feedback/message-put
+feedback/record
+goal/change
+hook/invoked
+hook/result
+image/offload
+llm/retry
+llm/retry-started
+model/selection
+permission/preset
+plan/mode
+request/context
+request/header
+sandbox/mode
+schedule/change
+session-log-deepseek/delivery-accepted
+session/end-seed
+session/title
+session/title-llm-request
+step/end
+step/start
+subagent/catalog
+subagent/descriptor
+subagent/model-selection-policy
+system/message
+team/member
+team/message/delivered
+team/message/queued
+team/task
+todo/write
+tool-workflow/agent-end
+tool-workflow/agent-start
+tool-workflow/run-end
+tool-workflow/run-start
+tool/call
+tool/ptc-dispatch
+tool/ptc-dispatch-start
+tool/result
+turn/end
+turn/start
+user/message
+web/deepseek-search-llm-request
+workspace/changes

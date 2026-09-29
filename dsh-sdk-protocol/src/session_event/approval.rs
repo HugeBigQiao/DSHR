@@ -1,5 +1,14 @@
 //! 审批类扩展事件族：`approval/asked`、`approval/decided`、`approval/policy`、`permission/preset`。
-//! 官方：packages/interaction/user-approval/src/index.ts（asked/decided/policy）、
+//!
+//! 主要用途：审批询问/结果（按 id 配对）、会话审批策略开关、权限预设选择四组事件的 data 类型。
+//! 为什么需要：这是「模型想干危险动作，谁批准的」的唯一审计链，涉及两个插件包且语义独立于
+//! 工具事件（同一个 tool call 可能被拒而不产生 tool/result）；单列文件也让已知限制有出处——
+//! SDK 通知面固定 4 种、**没有**审批转发通道（见 DESIGN §10），故这里只做记录与展示。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（审批时间线）/ store（审计事实）。
+//! 下接：无（只依赖 serde）。
+//!
+//! 官方对应：packages/interaction/user-approval/src/index.ts（asked/decided/policy）、
 //! packages/interaction/permission-presets/src/index.ts（preset）。
 use serde::{Deserialize, Serialize};
 

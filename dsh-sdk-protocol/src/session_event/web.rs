@@ -1,5 +1,15 @@
 //! web 搜索扩展事件族：`web/deepseek-search-llm-request`。
-//! 官方：packages/web/web-search-deepseek/src/provider.ts。
+//!
+//! 主要用途：辅助 DeepSeek search 请求的精确快照（endpoint / api-version / 请求体）。
+//! 为什么需要：这是「搜索花费了多少钱、发了什么」的唯一记录，且请求体刻意采用
+//! **Anthropic Messages API 形状**（字段 snake_case，其余事件是 camelCase）——
+//! 不加说明极易把大小写改错；它也是 secret-free 的（不含 API key），可以安全落盘。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的统计域（web 搜索请求统计）。
+//! 下接：无（只依赖 serde；不引用通用 `Message`/`ContentBlock`，因为形状是 Anthropic 的）。
+//!
+//! 官方对应：packages/web/web-search-deepseek/src/provider.ts 的
+//! `SessionEventMap['web/deepseek-search-llm-request']`。
 use serde::{Deserialize, Serialize};
 
 /// `web/deepseek-search-llm-request` 的 data：辅助 DeepSeek search 请求的精确快照（dispatch 前记录）。

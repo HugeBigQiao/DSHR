@@ -1,6 +1,16 @@
 //! 工具工作流扩展事件族：`tool-workflow/run-start`、`tool-workflow/run-end`、
 //! `tool-workflow/agent-start`、`tool-workflow/agent-end`。
-//! 官方：packages/workflow/tool-workflow/src/types.ts（outcome/reason 在 packages/workflow/workflow/src/types.ts）。
+//!
+//! 主要用途：工作流 run 的开合与 run 内 `agent()` 子调用开合四组事件的 data 类型。
+//! 为什么需要：run 与 agent 是两层嵌套的配对结构（runId 分组、seq 配对），
+//! 且 `agent-start.childId` 是「工作流内 spawn 出的子会话」与主会话树之间的桥梁——
+//! 这套嵌套配对只有整体看才成立，故单列成族。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（工作流进度视图）。
+//! 下接：无（只依赖 serde）。
+//!
+//! 官方对应：packages/workflow/tool-workflow/src/types.ts 的 `tool-workflow/*` 四组
+//!（outcome/reason 在 packages/workflow/workflow/src/types.ts）。
 use serde::{Deserialize, Serialize};
 
 /// `tool-workflow/run-start` 的 data：打开一条持久化 run 记录。

@@ -10,8 +10,23 @@ members = [
 [workspace.package]
 edition = "2024"
 
+# Release 瘦身：iced + syntect 依赖树很大，默认 release 产物偏胖。
+# thin LTO + 单 codegen unit 换更小的二进制和更好的内联，strip 去掉符号表。
+# 刻意不开 panic = "abort"：iced/Tokio 的线程里仍走 unwind，避免单点 panic 直接崩掉整个进程。
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
 [workspace.dependencies]
-iced = "0.14"
+# 异步工具：engine 用 `stream::select_all` 把「N 个 runtime 的通知流」合成一条，
+# 避免为每个 runtime 起一个转发任务（见 dshr-state/src/engine/registry.rs 文件头）。
+futures = "0.3"
+# 渲染后端由各 crate 显式选择：dshr-ui 默认 tiny-skia（CPU），
+# 需要 GPU 时开 dshr-ui 的 wgpu-renderer feature。
+# 关掉默认 features 是为了不把 wgpu 无条件拉进依赖树（wgpu 基线常驻约 160 MB）。
+iced = { version = "0.14", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

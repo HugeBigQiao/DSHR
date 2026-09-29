@@ -1,9 +1,18 @@
-//! 内存会话快照（数据管道 s1 的折叠产物）：纯数据结构 + 无逻辑，全部 pub。
+//! 内存会话快照：fold 的折叠产物，纯数据结构 + 无逻辑、字段全 `pub`。
 //!
-//! 语义对照 dshr-ui/src/model.rs 的 MsgKind/MsgView/ToolView/ChatState（UI 消费意图），
-//! 但**不 import dshr-ui**（依赖方向 ui → state，禁止反向）。本模块只依赖
-//! dsh-sdk-protocol 的 TokenUsage / SessionStatus 两个共享类型。
-//! s2 落库时按 DESIGN §11.2 事实表从本快照取数即可，两路同源。
+//! 主要用途：UI 展示的唯一数据形状（经 `dshr-ui/src/model.rs` 映射成视图模型）；
+//! 同时是落库的输入（`store::Store::persist_snapshot` 的参数）。
+//! 为什么需要：它是 fold 与 UI / store 之间的**稳定契约**——只要这个形状不变，
+//! 协议层加事件、落库加表都不影响 UI 渲染代码。
+//! 依赖方向：**只出不进**——本模块不 import `dshr-ui`（依赖方向恒为 `ui → state`，禁止反向），
+//! 只依赖 `dsh_sdk_protocol` 的 `TokenUsage` / `SessionStatus` 两个共享类型。
+//! 上接：`fold.rs`（产出快照）、`raw.rs`（`EngineEvent::Snapshot` 携带它）、`store.rs`（落库输入）、
+//!       `dshr-ui/src/model.rs`（映射成视图模型）。
+//! 下接：`dsh_sdk_protocol::llm::TokenUsage`、`dsh_sdk_protocol::notifications::SessionStatus`。
+//! 官方对应：无（官方 wire 上没有这个形状；它是 dshr 为 UI 定义的投影）。
+//!
+//! 注：语义上对照 `dshr-ui/src/model.rs` 的 `MsgKind` / `MsgView` / `ToolView` / `ChatState`
+//! （UI 的消费意图），但两者刻意分开：本文件是「数据」，`model.rs` 是「视图」。
 use dsh_sdk_protocol::llm::TokenUsage;
 use dsh_sdk_protocol::notifications::SessionStatus;
 
@@ -89,7 +98,7 @@ pub struct FileDiff {
     pub removed: u64,
 }
 
-/// token 六桶累计（DESIGN §11.2 turns 表六列 / §11.3 六桶语义）。
+/// token 六桶累计（DESIGN.md §8.2 / §8.3）。
 /// 注意计数不相交：input 不含缓存，计费 = input + cache_read + cache_write；
 /// total 只在 adapter 报权威 totalTokens 时入账，缺省该桶为 0。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -126,7 +135,7 @@ pub struct TurnStat {
     pub usage: UsageAgg,
 }
 
-/// 会话级汇总（DESIGN §11.3 会话层）。
+/// 会话级汇总（DESIGN.md §8.3）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionStats {
     pub turns: u64,
@@ -139,7 +148,7 @@ pub struct SessionStats {
     /// 全部 assistant/message 的 token 六桶合计。
     pub usage: UsageAgg,
     /// LLM 耗时毫秒：s1 恒 0——单靠事件无可靠起止对（assistant/message 无配对计时），
-    /// s2 落库后用 step/request 配对/精确计时校准（DESIGN §11.3 请求层）。
+    /// s2 落库后用 step/request 配对/精确计时校准（DESIGN.md §8.3）。
     pub llm_ms: u64,
     /// 工具总耗时毫秒：s1 恒 0——事件时间差不可靠（重放/时钟），s2 落库后校准。
     pub tool_ms: u64,

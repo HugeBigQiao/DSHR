@@ -1,5 +1,17 @@
 //! 会话标题扩展事件族：`session/title`、`session/title-llm-request`。
-//! 官方：packages/session/session-title/src/index.ts、packages/session/session-title-llm/src/index.ts。
+//!
+//! 主要用途：会话标题整值快照（含来源与所依据的 messageSeqs）与标题生成请求的完整快照
+//! 两组事件的 data 类型。
+//! 为什么需要：标题是 UI 会话列表的唯一标识，且 `source.kind === 'user'` 意味着用户手动
+//! 重命名（要 pin 住、不能再被自动覆盖）——这条优先级规则必须写在文件级；
+//! `title-llm-request` 则记录了精确的辅助模型请求（另一次额外计费），与业务请求分开统计。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（会话标题）/ store（sessions.title 列）。
+//! 下接：`session_event/message.rs::Message`（标题请求的 messages）。
+//!
+//! 官方对应：packages/session/session-title/src/index.ts 的 `SessionEventMap['session/title']`、
+//! packages/session/session-title-llm/src/index.ts 的
+//! `SessionEventMap['session/title-llm-request']`。
 use serde::{Deserialize, Serialize};
 
 use crate::session_event::message::Message;

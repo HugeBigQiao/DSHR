@@ -1,5 +1,17 @@
 //! LLM 重试扩展事件族：`llm/retry`、`llm/retry-started`。
-//! 官方：packages/llm/llm-retry/src/types.ts。
+//!
+//! 主要用途：重试排程（bounded/normal 与 unbounded/always 两个 mode）与「重试真正开始」
+//! 两个事件的 data 类型。
+//! 为什么需要：重试 = 额外的 token 消耗，离线算账必须能把同一条 prompt 的多次尝试归并
+//!（靠 retry_id）；而 `turn`/`step` 藏在本族的联合变体内部，是 `meta::turn_step` 唯一的
+//! 特殊分支——单列文件便于说明这处结构差异。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `session_event/meta.rs::turn_step`（从本族 data 取 turn/step）；
+//!       `dshr-state` 的统计域（请求级重试/失败统计）。
+//! 下接：`crate::llm::LlmFailure`（失败详情）。
+//!
+//! 官方对应：packages/llm/llm-retry/src/types.ts 的 `SessionEventMap['llm/retry']`
+//! 与 `SessionEventMap['llm/retry-started']`。
 use serde::{Deserialize, Serialize};
 
 use crate::llm::LlmFailure;

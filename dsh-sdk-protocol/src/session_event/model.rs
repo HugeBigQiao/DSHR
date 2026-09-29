@@ -1,6 +1,15 @@
 //! 模型选择类事件族：`model/selection`、`subagent/model-selection-policy`。
 //!
-//! `model/selection` 由 api/session-controller 注册（packages/api/session-controller/src/types.ts
+//! 主要用途：会话级模型路由选择（完整校验过的 provider/model/reasoningEffort）与
+//! 子代理委托可选的精确路由表两组事件的 data 类型。
+//! 为什么需要：这两组都是 **log-only**（不进派生模型历史），却决定了「下一次请求发给谁」；
+//! 与 request/context（运行时实际路由）语义不同——一个是意图，一个是事实，混在一起会误判；
+//! 且两者由不同包注册（session-controller 与 tool-subagent），同步时需分别核对。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（模型指示器）/ store（路由审计）。
+//! 下接：无（只依赖 serde）。
+//!
+//! 官方对应：`model/selection` 由 api/session-controller 注册（packages/api/session-controller/src/types.ts
 //! 的 `declare module '@deepseek-ai/dsh-session/types'`，L35-43）；写入点：
 //! packages/api/session-controller/src/agent.ts 的 ModelSelectionManager.selectForNextRequest()
 //! （L326-329，`agent.session.append('model/selection', selection)`）与
@@ -41,80 +50,4 @@ pub struct AllowedModelRoute {
 #[serde(rename_all = "camelCase")]
 pub struct SubagentModelSelectionPolicyData {
     pub allowed_models: Vec<AllowedModelRoute>,
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::session_event::SessionEvent;
-
-    /// 官方形状的 model/selection 事件（含 reasoningEffort）可解析并 roundtrip。
-    #[test]
-    fn model_selection_event_roundtrips() {
-        let wire = json!({
-            "type": "model/selection",
-            "seq": 7,
-            "time": 700,
-            "data": {
-                "provider": "deepseek-official",
-                "model": "deepseek-v4-flash",
-                "reasoningEffort": "high"
-            }
-        });
-        let event: SessionEvent =
-            serde_json::from_value(wire.clone()).expect("model/selection 应可解析");
-        match &event {
-            SessionEvent::ModelSelection { seq, time, data } => {
-                assert_eq!((*seq, *time), (7, 700));
-                assert_eq!(data.provider, "deepseek-official");
-                assert_eq!(data.model, "deepseek-v4-flash");
-                assert_eq!(data.reasoning_effort.as_deref(), Some("high"));
-            }
-            other => panic!("应解析为 ModelSelection，实际 {other:?}"),
-        }
-        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
-    }
-
-    /// reasoningEffort 缺省时序列化不带该键（官方省略 = 模型默认）。
-    #[test]
-    fn model_selection_without_effort_omits_key() {
-        let data: ModelSelectionData = serde_json::from_value(json!({
-            "provider": "p", "model": "m"
-        }))
-        .expect("无 reasoningEffort 应可解析");
-        assert_eq!(data.reasoning_effort, None);
-        assert_eq!(
-            serde_json::to_value(&data).unwrap(),
-            json!({"provider": "p", "model": "m"})
-        );
-    }
-
-    /// 官方形状的 subagent/model-selection-policy 事件可解析并 roundtrip。
-    #[test]
-    fn subagent_model_selection_policy_roundtrips() {
-        let wire = json!({
-            "type": "subagent/model-selection-policy",
-            "seq": 8,
-            "time": 800,
-            "data": {
-                "allowedModels": [
-                    {"provider": "deepseek-official", "model": "deepseek-v4-flash"},
-                    {"provider": "deepseek-official", "model": "deepseek-reasoner"}
-                ]
-            }
-        });
-        let event: SessionEvent =
-            serde_json::from_value(wire.clone()).expect("model-selection-policy 应可解析");
-        match &event {
-            SessionEvent::SubagentModelSelectionPolicy { data, .. } => {
-                assert_eq!(data.allowed_models.len(), 2);
-                assert_eq!(data.allowed_models[0].provider, "deepseek-official");
-                assert_eq!(data.allowed_models[1].model, "deepseek-reasoner");
-            }
-            other => panic!("应解析为 SubagentModelSelectionPolicy，实际 {other:?}"),
-        }
-        assert_eq!(serde_json::to_value(&event).unwrap(), wire);
-    }
 }

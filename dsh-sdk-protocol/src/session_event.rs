@@ -1,15 +1,35 @@
 //! `SessionEvent`：会话日志事件（`type` 字段打标的判别联合）。
+//!
+//! 主要用途：给出会话事件信封（seq/time/data）与 59 种已知事件的判别枚举，
+//! 是「dsh 会话里发生了什么」在 Rust 侧的唯一类型化视图。
+//! 为什么需要：信封与判别枚举必须与事件 data 分开——枚举本体是**编译期穷尽匹配**的锚点
+//!（官方加事件时先在这里加变体，编译器会把 fallback/meta 两处漏改点报出来），
+//! 而 data 按事件族拆文件是行数约束（单文件 ≤350 行）与变化频率隔离
+//!（各族的官方出处分散在不同插件包，改动互不相干）。判别枚举不 derive `Deserialize`
+//! 也是刻意的：未知类型必须能进 `Unknown`，只能手写分发（见 fallback.rs）。
+//! 上接：`notifications.rs`（SessionEventNotification.event）；`dsh-sdk-client` 的 api.rs
+//!       （按变体取回执与助手文本）；`dshr-state` 的 fold / record（投影与 WireLog 回放）。
+//! 下接：各事件族子模块（`turn` / `message` / `tool` / …）、`fallback`（手写 Deserialize）、
+//!       `meta`（type/time/seq/turn_step 访问器）。
+//!
+//! 官方对应：packages/core/session/src/types.ts 的 `SessionEvent`（信封 + `SessionEventMap`；
+//! 核心事件在 core 包声明，其余由各插件包 `declare module` 扩展——各族官方出处见子模块文件头）
+//! 与事件名全集的上游生成物 packages/core/session/src/known-event-types.ts。
+//!
 //! 信封 + 判别枚举放本文件，事件 data 按事件族拆到子模块：
 //! 每个子模块对应官方 `packages/core/session/src/types.ts` 的 `SessionEventMap` 一组事件
-//! （核心 13 种在核心包；扩展事件由各插件包 `declare module` 注册，见各文件头注释）。
+//! （少数在 core 包声明；多数由各插件包 `declare module` 注册，见各文件头注释）。
 pub mod agent;
 pub mod approval;
+pub mod catalog;
 pub mod command;
 pub mod compaction;
+pub mod deliverable;
 pub mod descriptor;
 pub mod fallback;
 pub mod goal;
 pub mod hook;
+pub mod image;
 pub mod message;
 pub mod message_source;
 mod meta;
@@ -30,6 +50,12 @@ pub mod workflow;
 use serde::Serialize;
 
 /// 事件信封：`type` 判别 + 公共字段 `seq/time` + 各自 `data`。
+///
+/// 为什么需要：这是全 crate 唯一的「枚举 + 手写反序列化」组合——官方事件面是
+/// merge-extensible 的，派生 `Deserialize` 会让任何未知/漂移的事件整体解析失败，
+/// 因此 `Deserialize` 由 fallback.rs 手工实现（未知 → `Unknown`，已知但漂移 → 降级 `Unknown`）。
+/// 三处维护纪律（漏一处要么解析不到、要么穷尽匹配编译失败）：本枚举的变体、
+/// `fallback.rs` 的分发、`meta.rs` 的四个访问器。
 /// 官方：packages/core/session/src/types.ts 的 SessionEvent（404 行起）
 /// 用在 session.event 通知的 params.event。
 /// 注意：wire 类型带斜杠（turn/start），不能用 kebab-case，逐个显式 rename；
@@ -134,6 +160,34 @@ pub enum SessionEvent {
         seq: u64,
         time: u64,
         data: session::SessionEndSeedData,
+    },
+    /// present 工具成功交付的文件。
+    #[serde(rename = "deliverables/presented")]
+    DeliverablesPresented {
+        seq: u64,
+        time: u64,
+        data: deliverable::DeliverablesPresentedData,
+    },
+    /// 增量 agent 会话变更（工具声明中途增删）。
+    #[serde(rename = "developer/message")]
+    DeveloperMessage {
+        seq: u64,
+        time: u64,
+        data: message::DeveloperMessageData,
+    },
+    /// 选中的输入图片被卸载，后续请求改发占位文本。
+    #[serde(rename = "image/offload")]
+    ImageOffload {
+        seq: u64,
+        time: u64,
+        data: image::ImageOffloadData,
+    },
+    /// 某 turn 的工作区变更摘要已生成（摘要本体留在 Host）。
+    #[serde(rename = "workspace/changes")]
+    WorkspaceChanges {
+        seq: u64,
+        time: u64,
+        data: image::WorkspaceChangesData,
     },
     /// 选中的 agent preset id（最后写入者胜）。
     #[serde(rename = "agent-preset/selected")]
@@ -317,6 +371,13 @@ pub enum SessionEvent {
         time: u64,
         data: descriptor::SubagentDescriptorData,
     },
+    /// 父会话记录的直接子 agent 目录事实。
+    #[serde(rename = "subagent/catalog")]
+    SubagentCatalog {
+        seq: u64,
+        time: u64,
+        data: catalog::SubagentCatalogData,
+    },
     /// 团队成员快照。
     #[serde(rename = "team/member")]
     TeamMember {
@@ -435,5 +496,16 @@ pub enum SessionEvent {
         source_event_seqs: Option<Vec<u64>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         surface_op: Option<serde_json::Value>,
+        /// 「**类型认识、data 没解析出来**」= 协议漂移信号（原始串见 `event_type`）。
+        ///
+        /// 为什么要与「类型本身就未知」分开：后者是 merge-extensible 的**预期内**行为
+        ///（插件自注册事件），前者是**缺陷/漂移**（官方改了字段形状，或我们的变体写错）。
+        /// 两者此前都只表现为「静默降级」，2026-09-29 因此漏掉了 10 条消息（见 AI-LOG §2.1）。
+        /// engine 用 `degraded_event()` 把前者写进 app 轨迹（`event.degraded`），
+        /// 从此漂移在 wire log 里可查。
+        ///
+        /// 不进序列化：它描述「本次解析怎么失败的」，不是 wire 上的字段。
+        #[serde(skip)]
+        degraded: bool,
     },
 }

@@ -1,5 +1,15 @@
 //! 模式开关扩展事件族：`plan/mode`、`sandbox/mode`。
-//! 官方：packages/plan/plan-mode/src/index.ts、packages/sandbox/sandbox-policy/src/session-mode.ts。
+//!
+//! 主要用途：plan 模式开关与沙箱模式（含 delegation 来源标记）两组事件的 data 类型。
+//! 为什么需要：这两个开关直接改变**工具可用性与权限**（沙箱模式决定能写哪），
+//! 回放时必须取最后一个事件当作当前值（覆盖式，无增量），与快照/增量事件的折叠方式不同；
+//! 单列文件让这条折叠约定只写一次，也便于与 approval/policy 对照（同 turn 会一起被写）。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（模式指示器）。
+//! 下接：无（只依赖 serde）。
+//!
+//! 官方对应：packages/plan/plan-mode/src/index.ts 的 `SessionEventMap['plan/mode']`、
+//! packages/sandbox/sandbox-policy/src/session-mode.ts 的 `SessionEventMap['sandbox/mode']`。
 use serde::{Deserialize, Serialize};
 
 /// `plan/mode` 的 data：plan 模式开关（最后写入者胜，无事件 fold 为 inactive）。

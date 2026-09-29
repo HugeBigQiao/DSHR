@@ -1,5 +1,17 @@
 //! agent 侧扩展事件族：`agent-preset/selected`、`agent/inbox/spliced`。
-//! 官方：packages/preset/agent-presets/src/session.ts、packages/core/agent/src/types.ts。
+//!
+//! 主要用途：preset 选择（最后写入者胜）与消息 inbox 的 splice 增量两组事件的 data 类型。
+//! 为什么需要：这两组是 UI 侧「当前 preset / 待发消息队列」的状态来源，却由两个不同插件
+//! 各自 `declare module` 注册（agent-presets 与 core/agent），单列文件便于按插件包核对同步；
+//! 其中 `agent/inbox/spliced` 的 `inserted` 还是 dsh-sdk-client 判定 prompt 回执的依据。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dsh-sdk-client` 的 api.rs（用 `AgentInboxSpliced.inserted` 认回执）；
+//!       `dshr-state` 的 fold（inbox 重放）。
+//! 下接：`session_event/message.rs::Message`（inbox 载荷里的用户消息）。
+//!
+//! 官方对应：packages/preset/agent-presets/src/session.ts 的
+//! `SessionEventMap['agent-preset/selected']`、packages/core/agent/src/types.ts 的
+//! `SessionEventMap['agent/inbox/spliced']`。
 use serde::{Deserialize, Serialize};
 
 use crate::session_event::message::Message;

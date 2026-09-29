@@ -1,5 +1,16 @@
 //! 压缩类扩展事件族：`compaction/start`、`compaction/end`、`compaction/prune`、`compaction/summary`。
-//! 官方：packages/compaction/compaction/src/types.ts。
+//!
+//! 主要用途：一次压缩事务的开始/结束、剪枝计量与总结四组事件的 data 类型。
+//! 为什么需要：压缩会**改写模型可见的消息面**（surface 替换），是唯一会「让历史变短」的事件族，
+//! 其配对契约（start 持锁直到 end、prune 紧随的 replace 取其价格）必须整体理解，故自成一族；
+//! 单独成文件也让 `ShadowedRange` 这类只在压缩内出现的辅助类型有归属。
+//! 上接：`session_event.rs` 的判别枚举与 `session_event/fallback.rs` 的分发；
+//!       `dshr-state` 的 fold（token 账目/上下文窗口展示）。
+//! 下接：`crate::content_block::ContentBlock`（summary / rawOutput 内容块）、
+//!       `crate::llm::TokenUsage`（总结调用的 token 账目）。
+//!
+//! 官方对应：packages/compaction/compaction/src/types.ts 的 `compaction/start` /
+//! `compaction/end` / `compaction/prune` / `compaction/summary` 四组。
 use serde::{Deserialize, Serialize};
 
 use crate::content_block::ContentBlock;
