@@ -295,6 +295,29 @@ impl App {
                 self.data.chat.apply_snapshot(&snap);
                 self.sync_session_row();
             }
+            // **按需拉取的快照**（`EngineCmd::ReadSnapshot` 的结果）：与推送的快照**同源同形**
+            //（都是 `SessionSnapshot`），所以走同一段应用逻辑——将来「打开历史会话」接上时，
+            // 这里不需要再改一次。
+            //
+            // ⚠️ 当前不会收到：UI 还没有发 `ReadSnapshot` 的地方（消费侧切换 = M5 的第一件事，
+            // 因为「事件只发轻通知」必须与「消费方按需拉」同时改，否则界面会静止）。
+            // 保留这个臂而不是 `=> {}`：M5 接上时它会立刻生效，而不是静默丢事件。
+            BridgeEvent::Engine(EngineEvent::SessionLoaded { snapshot, .. }) => {
+                let snap = *snapshot;
+                if !snap.session_id.is_empty() && snap.session_id != self.data.chat.session_id {
+                    self.expanded_tools.clear();
+                }
+                self.data.chat.apply_snapshot(&snap);
+                self.sync_session_row();
+            }
+            // **会话目录**（`EngineCmd::ListSessions` 的结果）：历史列表要挂在侧边栏的
+            // 哪一层、怎么与「运行中的 runtime 树」并存，是 M5 的界面设计问题。
+            // 现在没有消费方（UI 不发 ListSessions），所以这里只记一行状态提示，
+            // 让「收到了但没接」在界面上可见，而不是无声丢弃。
+            BridgeEvent::Engine(EngineEvent::Sessions { rows }) => {
+                self.data.chat.status_line =
+                    format!("会话目录：{} 条（历史列表 UI 待 M5 接入）", rows.len());
+            }
             BridgeEvent::Engine(EngineEvent::SessionReset { session, .. }) => {
                 // 换会话：新 id 由 engine 生成并在此回报。侧边栏换行、展开态清空、
                 // 聊天区状态复位——随后的空快照会再刷一次消息列表。

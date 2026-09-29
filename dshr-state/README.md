@@ -70,8 +70,8 @@ dshr-ui（纯页面）
 
 | 文件 | 职责 |
 |---|---|
-| `engine.rs` | 类型层：`EngineCmd` / `EngineEvent` / `SessionId`（+ 协议类型再出口） |
-| `engine/registry.rs` | `Engine`：runtime 注册表 + 命令路由 + 事件循环（多路复用用 `FuturesUnordered`） |
+| `engine.rs` | 类型层：`EngineCmd`（Start/Stop/Reset/Prompt/**ReadSnapshot/ListSessions**）/ `EngineEvent`（Started/Snapshot/SessionReset/Stopped/Failed/**SessionLoaded/Sessions**）/ `SessionId`（+ 协议类型与 `SessionSummary` 再出口） |
+| `engine/registry.rs` | `Engine`：runtime 注册表 + 命令路由 + 事件循环（多路复用用 `FuturesUnordered`）+ **按需拉取**（运行中优先、否则库里复原） |
 | `engine/session.rs` | 单会话态：`Folder` + 脏标记 + 上次快照 |
 
 ### 2.3 `fold` — UI 数据投影（**纯函数，无副作用**）
@@ -90,13 +90,18 @@ dshr-ui（纯页面）
 
 | 文件 | 职责 |
 |---|---|
-| `snapshot.rs` | **fold 的输出类型**（`SessionSnapshot` / `MsgItem` / `TurnStat` / `ToolItem` / `FileDiff` / `StreamSummary` / `UsageAgg`）。这是「UI 模型」，engine 只搬运不解释 |
-| `store.rs` | `Store` 门面：`open` / `open_in_memory` / `init_schema` / `persist_snapshot` / `session_summaries` |
-| `store/schema.rs` | §8.2 表集 DDL + §8.3 聚合查询 SQL |
+| `snapshot.rs` | **fold 的输出类型**（`SessionSnapshot` / `MsgItem` / `TurnStat` / `ToolItem` / `FileDiff` / `StreamSummary` / `UsageAgg` / `RequestView`）。这是「UI 模型」，engine 只搬运不解释；`RequestView`（`last_request`）是「等待模型可见」的数据基础 |
+| `store.rs` | `Store` 门面：`open` / `open_in_memory` / `init_schema`（含版本迁移） / `persist_snapshot` / **`load_snapshot` / `load_session_ids`（复原）** / `ensure_session` / `append_request` / `session_summaries` / `export_rows` |
+| `store/schema.rs` | §8.2 表集 DDL + §8.3 聚合查询 SQL + `ExportTable`（导出用显式列序与稳定排序）+ `SCHEMA_VERSION`/`MIGRATIONS_V2`（加列迁移） |
+| `export.rs` | **CSV 导出**：库表（六张）→ CSV；`replay_sessions` 按会话分组回放 wire-log；`export_all` 一次导出全套（监控页历史导出的先行实现） |
 | `store/write.rs` | persist 内部实现（`upsert_session` / `replace_turns` / `replace_tool_calls` / `replace_file_ops` / `infer_op`） |
 | `store/convert.rs` | rusqlite 整数列 ↔ u64 转换、时间戳、状态串 |
 | `store/error.rs` | `StoreError` + `Result` |
 | `record.rs` | WireLog 装载（`Recorder`：`cat="dsh"` 线级记录 + `cat="app"` 应用轨迹） |
+
+**落库粒度（2026-09-29）**：除逐 chunk 之外全落——`messages` 逐条对话（含注入/尝试、turn/step/
+source/error、工具全文与原样 meta、流摘要七列）、`turns`、`tool_calls`（含失败原因）、`file_ops`、
+`requests`（每次 prompt 的耗时/成败/原因）、`runtime_logs`。
 
 **落库语义 = 会话整体重放**：`persist_snapshot` 在一个事务内 UPSERT `sessions` +
 DELETE+INSERT `turns`/`tool_calls`/`file_ops`，同一快照重复 persist **行数不变**（幂等）。
@@ -153,13 +158,14 @@ dshr-state/
 │   ├── fold/
 │   │   ├── event.rs      事件 → 折叠态
 │   │   └── render.rs     纯渲染/解析
-│   ├── snapshot.rs       fold 的输出类型（UI 模型）
+│   ├── snapshot.rs       fold 的输出类型（UI 模型 + last_request）
 │   ├── store.rs          sqlite 加工库门面
 │   ├── store/
 │   │   ├── error.rs      StoreError + Result
-│   │   ├── schema.rs     DDL + 聚合查询
+│   │   ├── schema.rs     DDL + 聚合查询 + ExportTable
 │   │   ├── convert.rs    i64 ↔ u64 / 时间戳 / 状态串
 │   │   └── write.rs      upsert / replace_*
+│   ├── export.rs         CSV 导出（库表 + 跨会话历史回放）
 │   ├── record.rs         WireLog（cat=dsh / cat=app）
 │   ├── config.rs         配置加载
 │   ├── secrets.rs        API key
@@ -167,8 +173,9 @@ dshr-state/
 │   └── workspace.rs      工作区文件读写
 ├── tests/                契约测试（2026-09-29 起按此目录重建）
 │   ├── engine_flow.rs        engine 主链路 / 路由隔离 / stderr 与退出落盘
-│   ├── fold_projection.rs    fold 投影语义 + 在线/离线同源同巡
+│   ├── fold_projection.rs    fold 投影语义 + 在线/离线同源同巡 + 模型请求可见
 │   ├── store_persistence.rs  落库幂等与替换语义
+│   ├── export_csv.rs         CSV 导出契约 + 跨会话回放分组（DSHR_EXPORT=1 真跑）
 │   ├── engine_session.rs     真实会话逐步透明账本（DSHR_LIVE=1）
 │   └── _conventions.md       本 crate 的测试约定（下划线前缀 → 不是测试目标）
 ├── Cargo.toml

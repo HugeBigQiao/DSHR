@@ -65,6 +65,8 @@ struct FakeDriver {
     status: Arc<RuntimeStatus>,
     /// 收到的 prompt 参数（断言「命令真的走到了进程层」）。
     prompts: Arc<Mutex<Vec<SessionPromptParams>>>,
+    /// 让 `prompt` 返回错误（验证「发送失败也要落库/可见」这一条：见 prompt 处理里的失败分支）。
+    fail_prompt: bool,
 }
 
 impl SessionDriver for FakeDriver {
@@ -89,9 +91,18 @@ impl SessionDriver for FakeDriver {
     ) -> BoxFuture<'a, Result<SessionPromptResult, ClientError>> {
         let params = params.clone();
         let prompts = self.prompts.clone();
+        let fail = self.fail_prompt;
         Box::pin(async move {
             let message_id = format!("m-{}", params.session_id);
             prompts.lock().expect("prompt 记录锁").push(params);
+            if fail {
+                // 用 RpcError 而不是 Io：它更像真实的「runtime 拒绝了这次请求」。
+                return Err(ClientError::RpcError {
+                    code: -32000,
+                    message: "runtime 拒绝了这次 prompt".to_string(),
+                    data: None,
+                });
+            }
             Ok(SessionPromptResult { message_id })
         })
     }
@@ -142,6 +153,28 @@ fn inject(
         tx: tx.clone(),
         status: Arc::new(RuntimeStatus::default()),
         prompts: prompts.clone(),
+        fail_prompt: false,
+    });
+    engine.register_injected_runtime(RuntimeId::new(id), driver, SessionId::new(session), rx);
+    (tx, prompts)
+}
+
+/// 同上，但 driver 的 `prompt` 会失败（验证「发送失败 → 落库 + 会话里可见」）。
+fn inject_failing_prompt(
+    engine: &mut Engine,
+    id: &str,
+    session: &str,
+) -> (
+    broadcast::Sender<Notification>,
+    Arc<Mutex<Vec<SessionPromptParams>>>,
+) {
+    let (tx, rx) = broadcast::channel(CAP);
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let driver: Box<dyn SessionDriver> = Box::new(FakeDriver {
+        tx: tx.clone(),
+        status: Arc::new(RuntimeStatus::default()),
+        prompts: prompts.clone(),
+        fail_prompt: true,
     });
     engine.register_injected_runtime(RuntimeId::new(id), driver, SessionId::new(session), rx);
     (tx, prompts)
@@ -162,6 +195,7 @@ fn inject_with_stderr(
         tx: tx.clone(),
         status: Arc::new(RuntimeStatus::default()),
         prompts: Arc::new(Mutex::new(Vec::new())),
+        fail_prompt: false,
     });
     engine.register_injected_runtime_with_stderr(
         RuntimeId::new(id),
@@ -202,6 +236,15 @@ fn snapshot_of<'a>(evs: &'a [EngineEvent], session: &str) -> Option<&'a SessionS
         } if s.as_str() == session => Some(&**snapshot),
         _ => None,
     })
+}
+
+/// 读 `requests` 表的全部行（列序见 `ExportTable::Requests`）。
+fn request_rows(engine: &Engine) -> Vec<Vec<String>> {
+    let db = engine.store_ref().expect("已注入内存库");
+    let (_headers, rows) = db
+        .export_rows(dshr_state::store::ExportTable::Requests)
+        .expect("导出请求表");
+    rows
 }
 
 /// 取某个会话在库里的聚合行。
@@ -253,6 +296,16 @@ fn assistant_data(text: &str) -> serde_json::Value {
             "totalTokens": 120,
             "reasoningTokens": 5,
         },
+    })
+}
+
+/// `user/message` 的 data（data 即 Message 本身；`source.kind = "user"` 才会折成 User 行）。
+fn user_data(id: &str, text: &str) -> serde_json::Value {
+    json!({
+        "id": id,
+        "role": "user",
+        "content": [{ "type": "text", "text": text }],
+        "source": { "kind": "user" },
     })
 }
 
@@ -581,6 +634,79 @@ async fn no_runtime_waits_for_command() {
     );
 }
 
+/// 请求事实落库 + **失败也要可见**（用户 2026-09-29 明确要求）。
+///
+/// 为什么值得一条契约：这类事实在 wire 上**不存在**——发送失败时连响应都没有，
+/// 成功时也没有耗时字段。它们只能由 engine 在调用的前后自己记，所以必须有人守住
+/// 「成功的记了、失败的原因也记了、会话里还看得到一行」。
+#[tokio::test]
+async fn prompt_requests_are_recorded_and_failures_are_visible() {
+    // —— 成功路径：requests 表落一行（含 method 与耗时） ——
+    let (mut engine, cmds) = boot();
+    let (_events, _prompts) = inject(&mut engine, "rt-req", "s-req");
+    send(
+        &mut engine,
+        &cmds,
+        EngineCmd::Prompt {
+            id: RuntimeId::new("rt-req"),
+            session: SessionId::new("s-req"),
+            text: "你好".to_string(),
+        },
+    )
+    .await;
+    let rows = request_rows(&engine);
+    assert_eq!(rows.len(), 1, "一次 prompt 应落一行请求事实：{rows:?}");
+    assert_eq!(rows[0][4], "session/prompt", "method 列：{rows:?}");
+    assert_eq!(rows[0][7], "1", "success 列应记 1：{rows:?}");
+    assert!(rows[0][8].is_empty(), "成功时不该有失败原因：{rows:?}");
+
+    // —— 失败路径：requests 行记 0 + 原因，会话里留一条可见记录并落库 ——
+    let (mut engine, cmds) = boot();
+    let (_events, _prompts) = inject_failing_prompt(&mut engine, "rt-fail", "s-fail");
+    let evs = send(
+        &mut engine,
+        &cmds,
+        EngineCmd::Prompt {
+            id: RuntimeId::new("rt-fail"),
+            session: SessionId::new("s-fail"),
+            text: "这条会失败".to_string(),
+        },
+    )
+    .await;
+
+    let rows = request_rows(&engine);
+    assert_eq!(rows.len(), 1, "失败也要留一行：{rows:?}");
+    assert_eq!(rows[0][7], "0", "success 列应记 0：{rows:?}");
+    assert!(
+        rows[0][8].contains("prompt"),
+        "失败原因要落库（用户要求）：{rows:?}"
+    );
+
+    // 会话里必须有一行可见的失败记录（Notice），并且它带着 error（导出/查询都能看到）。
+    let snap = snapshot_of(&evs, "s-fail").expect("失败也要发一次快照给 UI");
+    let notice = snap
+        .messages
+        .iter()
+        .find(|m| m.kind == MsgKind::Notice && m.error.is_some())
+        .unwrap_or_else(|| panic!("应有失败提示行：{:?}", snap.messages));
+    assert!(notice.text.contains("发送失败"), "文案：{}", notice.text);
+    assert!(
+        notice.seq > 0,
+        "本地合成行也要有 seq（不能与 wire seq 撞主键）"
+    );
+
+    // 落库 + 复原：重启后这条失败记录仍在。
+    let db = engine.store_ref().expect("已注入内存库");
+    let back = db.load_snapshot("s-fail").expect("读回").expect("应有会话");
+    assert!(
+        back.messages
+            .iter()
+            .any(|m| m.error.as_deref().is_some_and(|e| e.contains("prompt"))),
+        "复原后仍能查到失败原因：{:?}",
+        back.messages
+    );
+}
+
 /// 协议漂移可见：**已知类型解析失败** → app 轨迹留一条 `event.degraded`。
 ///
 /// 为什么必须把这条钉住：协议层的容错策略是「data 解析失败 → lossless 降级 `Unknown`」，
@@ -648,4 +774,167 @@ async fn degraded_events_are_recorded_in_app_trajectory() {
     );
 
     let _ = std::fs::remove_file(&log);
+}
+
+/// **拉取运行中会话**（M6 的 B 方案）：`ReadSnapshot` 返回实时快照，并带上 runtime 标。
+///
+/// 为什么需要「拉」这个方向：推送只在**变更时**发生，而「UI 切到某个会话想看它现在的样子」
+/// 并没有变更可推——这时只能由消费方发起读。这条测试钉住三件事：
+/// 拉到的内容与推送的同源、带 runtime 标（UI 要按 runtime 建树）、以及**拉取无副作用**。
+#[tokio::test]
+async fn read_snapshot_pulls_live_session() {
+    let (mut engine, cmds) = boot();
+    let (events, _prompts) = inject(&mut engine, "rt-pull", "s-pull");
+    events
+        .send(event_frame(
+            "s-pull",
+            "user/message",
+            1,
+            user_data("m-1", "拉我一下"),
+        ))
+        .expect("engine 侧接收端应在");
+    step(&mut engine).await;
+
+    let evs = send(
+        &mut engine,
+        &cmds,
+        EngineCmd::ReadSnapshot {
+            session: SessionId::new("s-pull"),
+        },
+    )
+    .await;
+
+    let (runtime, snap) = evs
+        .iter()
+        .find_map(|e| match e {
+            EngineEvent::SessionLoaded {
+                runtime, snapshot, ..
+            } => Some((runtime, &**snapshot)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("应回一条 SessionLoaded：{evs:?}"));
+    assert_eq!(
+        runtime.as_ref().map(RuntimeId::as_str),
+        Some("rt-pull"),
+        "运行中的会话要带 runtime 标（UI 按 runtime 建树）"
+    );
+    assert_eq!(snap.session_id, "s-pull");
+    assert_eq!(snap.messages.len(), 1, "内容应与推送的同源");
+    assert_eq!(snap.messages[0].text, "拉我一下");
+
+    // **拉取无副作用**：不得再落一次库、不得改状态。
+    let before = summary_of(&engine, "s-pull").last_seq;
+    let evs = send(
+        &mut engine,
+        &cmds,
+        EngineCmd::ReadSnapshot {
+            session: SessionId::new("s-pull"),
+        },
+    )
+    .await;
+    assert!(
+        !evs.is_empty(),
+        "第二次拉取仍应回答（拉是只读，不该因为『没变化』而沉默）"
+    );
+    assert_eq!(
+        summary_of(&engine, "s-pull").last_seq,
+        before,
+        "拉取不该写库（否则每次都多一次 persistence 抖动）"
+    );
+}
+
+/// **拉取历史会话**（复原）：runtime 已经停掉/应用重启过，会话只在库里 → `runtime: None`。
+///
+/// 这是 M5「打开历史会话」的数据面：`ReadSnapshot` 双路查找（运行中 → 库里复原），
+/// 消费方拿到的形状完全一样（同一个 `EngineEvent::SessionLoaded`）。
+#[tokio::test]
+async fn read_snapshot_restores_archived_session() {
+    let (mut engine, cmds) = boot();
+    let (events, _prompts) = inject(&mut engine, "rt-arch", "s-arch");
+    events
+        .send(event_frame(
+            "s-arch",
+            "user/message",
+            1,
+            user_data("m-1", "历史里的一句话"),
+        ))
+        .expect("engine 侧接收端应在");
+    step(&mut engine).await;
+
+    // 停掉 runtime：会话从注册表消失（收尾落库），此后只有库里还有它。
+    send(
+        &mut engine,
+        &cmds,
+        EngineCmd::StopRuntime {
+            id: RuntimeId::new("rt-arch"),
+        },
+    )
+    .await;
+
+    let evs = send(
+        &mut engine,
+        &cmds,
+        EngineCmd::ReadSnapshot {
+            session: SessionId::new("s-arch"),
+        },
+    )
+    .await;
+    let (runtime, snap) = evs
+        .iter()
+        .find_map(|e| match e {
+            EngineEvent::SessionLoaded {
+                runtime, snapshot, ..
+            } => Some((runtime, &**snapshot)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("库里应能复原出会话：{evs:?}"));
+    assert!(
+        runtime.is_none(),
+        "历史会话不挂在任何运行中的 runtime 下（硬塞一个 id 会让 UI 建出假节点）"
+    );
+    assert_eq!(snap.messages.len(), 1, "复原出的历史应含那条消息");
+    assert_eq!(snap.messages[0].text, "历史里的一句话");
+
+    // 找不到的会话**静默**（不造空快照、不报错）——目录由 ListSessions 提供。
+    let evs = send(
+        &mut engine,
+        &cmds,
+        EngineCmd::ReadSnapshot {
+            session: SessionId::new("s-不存在"),
+        },
+    )
+    .await;
+    assert!(evs.is_empty(), "未知会话应静默：{evs:?}");
+}
+
+/// **会话目录**：`ListSessions` 给出库里的聚合视图（历史列表 / 复原入口）。
+#[tokio::test]
+async fn list_sessions_returns_directory() {
+    let (mut engine, cmds) = boot();
+    let (events, _prompts) = inject(&mut engine, "rt-dir", "s-dir");
+    events
+        .send(event_frame(
+            "s-dir",
+            "user/message",
+            1,
+            user_data("m-1", "一句话"),
+        ))
+        .expect("engine 侧接收端应在");
+    step(&mut engine).await;
+
+    let evs = send(&mut engine, &cmds, EngineCmd::ListSessions).await;
+    let rows = evs
+        .iter()
+        .find_map(|e| match e {
+            EngineEvent::Sessions { rows } => Some(rows),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("应回一条 Sessions：{evs:?}"));
+
+    let row = rows
+        .iter()
+        .find(|r| r.id == "s-dir")
+        .unwrap_or_else(|| panic!("目录里应有 s-dir：{rows:?}"));
+    assert!(row.updated_at > 0, "目录行要有时间戳（排序依据）：{row:?}");
+    assert!(row.last_seq >= 1, "目录行要带进度（最后 seq）：{row:?}");
 }

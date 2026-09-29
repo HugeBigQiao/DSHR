@@ -84,6 +84,23 @@ pub(super) fn reasoning_of(content: &[ContentBlock]) -> Option<String> {
     }
 }
 
+/// 请求头追加原因 → 一行文本（快照展示用；对照 `SessionEventMap['request/header'].reason`）。
+///
+/// 官方取值 `initial` / `resume` / `change` / `series`，是 merge-extensible 的字符串联合
+///（Rust 侧 `RequestHeaderReason::Unknown` 兜底），所以兜底分支写成 "other"。
+pub(super) fn request_reason_text(
+    r: &dsh_sdk_protocol::session_event::request::RequestHeaderReason,
+) -> String {
+    use dsh_sdk_protocol::session_event::request::RequestHeaderReason as R;
+    match r {
+        R::Initial => "initial".to_string(),
+        R::Resume => "resume".to_string(),
+        R::Change => "change".to_string(),
+        R::Series => "series".to_string(),
+        R::Unknown => "other".to_string(),
+    }
+}
+
 /// 轮结束原因 → 一行文本（快照展示用）。
 pub(super) fn reason_text(r: &TurnEndReason) -> String {
     match r {

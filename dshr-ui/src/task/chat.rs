@@ -164,6 +164,23 @@ fn render_message<'a>(app: &'a App, msg: &'a MsgView) -> Element<'a, Message> {
         MsgKind::Notice => container(text(&msg.text).size(app.fs(11)).color(p.label_caption))
             .padding([2, 4])
             .into(),
+        // 下面两种**默认不出现在视图里**（`model.rs::apply_snapshot` 已过滤掉；数据仍在快照/库/导出里）。
+        // 这里仍给出合理长相，而不是 `unreachable!()`：一旦将来加了「显示注入/尝试」开关，
+        // 或过滤被误删，它们会以折叠小字出现，而不是让界面 panic。
+        MsgKind::Injected => container(
+            text(format!("[{}] {}", msg.source, msg.text))
+                .size(app.fs(10))
+                .color(p.label_tertiary),
+        )
+        .padding([2, 4])
+        .into(),
+        MsgKind::Attempt => container(
+            text("[模型尝试（未提交）]")
+                .size(app.fs(10))
+                .color(p.label_tertiary),
+        )
+        .padding([2, 4])
+        .into(),
     }
 }
 

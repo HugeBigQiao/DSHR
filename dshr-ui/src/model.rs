@@ -141,6 +141,9 @@ pub struct MsgView {
     pub tool: Option<ToolItem>,
     /// 时间标签：由事件 time(epoch ms) 格式化（UTC HH:mm；本地化待办，见 hhmm_utc）。
     pub time_label: String,
+    /// 来源 kind 文本（`user` / `model` / `system-prompt` / `runtime-context` / …）。
+    /// 为什么带给视图：Injected 行若要显示（或做「显示注入」开关），需要知道它「从哪来」。
+    pub source: String,
     /// 事件 seq（稳定序；工具卡展开状态按它索引——UI 侧 expanded 集合放 App）。
     pub seq: u64,
 }
@@ -158,6 +161,7 @@ impl MsgView {
             stream: item.stream,
             tool: item.tool.clone(),
             time_label: hhmm_utc(item.time),
+            source: item.source.clone(),
             seq: item.seq,
         }
     }
@@ -241,7 +245,17 @@ impl ChatState {
             Some(SessionStatus::Running) => ChatStatus::Running,
             _ => ChatStatus::Idle,
         };
-        self.messages = snap.messages.iter().map(MsgView::from_item).collect();
+        // 显示策略（2026-09-29）：快照把**所有**消息都折成了行（含程序化注入与未提交的尝试），
+        // 因为库与导出要保真；聊天视图只渲染「对话本身」。
+        // 为什么不是渲染时过滤：空元素仍会占位（iced 的 column 会留出行高），
+        // 而且在映射处过滤能保证视图模型里根本没有这些行。
+        // 想看全量：`data/exports/` 的 CSV 或未来的监控页；要在此处加开关是一行的事。
+        self.messages = snap
+            .messages
+            .iter()
+            .filter(|m| !matches!(m.kind, MsgKind::Injected | MsgKind::Attempt))
+            .map(MsgView::from_item)
+            .collect();
         self.stats = ChatStats {
             turns: snap.stats.turns,
             steps: snap.stats.steps,

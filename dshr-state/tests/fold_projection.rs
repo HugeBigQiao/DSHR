@@ -398,6 +398,233 @@ fn replay_skips_non_notification_lines() {
     assert!(folder.push_wire_line("{不是 JSON").is_err());
 }
 
+/// 落库保真（用户 2026-09-29 要求「细致到每轮对话，能记多少记多少」）：
+/// 每行都要带 turn/step/source，注入类消息与未提交的尝试也要成行，工具失败要带**原因**。
+#[test]
+fn rows_carry_turn_step_source_and_failures() {
+    let mut folder = Folder::new();
+    feed(&mut folder, &frame("turn/start", 1, json!({ "turn": 3 })));
+    feed(
+        &mut folder,
+        &frame("step/start", 2, json!({ "turn": 3, "step": 2 })),
+    );
+    // 程序化注入（官方把 runtime-context 写成 role=user 的输入）。
+    feed(
+        &mut folder,
+        &frame(
+            "user/message",
+            3,
+            json!({
+                "id": "m-inj",
+                "role": "user",
+                "content": [{ "type": "text", "text": "沙箱策略：workspace-write" }],
+                "source": { "kind": "runtime-context", "form": "snapshot", "sections": [] },
+            }),
+        ),
+    );
+    // 人类输入。
+    feed(
+        &mut folder,
+        &frame("user/message", 4, user_message("m-u1", "你好")),
+    );
+    // 未提交的模型尝试（只有 stream，没有 message）。
+    feed(
+        &mut folder,
+        &frame(
+            "assistant/attempt",
+            5,
+            json!({
+                "turn": 3,
+                "step": 2,
+                "stream": [{ "type": "text-chunks", "time0": TIME_BASE + 5, "index": 0, "dt": [0], "texts": ["嗯"] }],
+            }),
+        ),
+    );
+    // 工具失败：带原因与 meta（含 diffs 正文）。
+    feed(
+        &mut folder,
+        &frame(
+            "tool/call",
+            6,
+            json!({ "turn": 3, "step": 2, "callId": "c1", "name": "run", "arguments": "{}" }),
+        ),
+    );
+    feed(
+        &mut folder,
+        &frame(
+            "tool/result",
+            7,
+            json!({
+                "turn": 3,
+                "step": 2,
+                "message": {
+                    "id": "m-t",
+                    "role": "tool",
+                    "content": [{ "type": "tool-result", "toolCallId": "c1", "content": [], "isError": true }],
+                    "source": { "kind": "tool", "callId": "c1" },
+                },
+                "error": { "name": "ToolError", "code": "EPERM", "reason": "权限不足" },
+                "meta": { "diffs": [{ "path": "a.rs", "oldText": "x", "newText": "x\ny" }] },
+            }),
+        ),
+    );
+
+    let snap = folder.snapshot();
+    let kinds: Vec<MsgKind> = snap.messages.iter().map(|m| m.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            MsgKind::Injected,
+            MsgKind::User,
+            MsgKind::Attempt,
+            MsgKind::Tool
+        ],
+        "注入与尝试都要成行（**显示策略归 UI**，记录必须全）"
+    );
+    assert_eq!(snap.messages[0].source, "runtime-context", "来源要落库");
+    assert_eq!(snap.messages[1].source, "user");
+    assert_eq!(snap.messages[2].source, "model");
+    for m in &snap.messages {
+        assert_eq!(m.turn, Some(3), "每行都要有轮归属：{m:?}");
+        assert_eq!(m.step, Some(2), "每行都要有步归属：{m:?}");
+    }
+    assert_eq!(
+        snap.messages[2].stream.expect("尝试应带流摘要").chunks,
+        1,
+        "未提交的尝试也要留下 token/流证据"
+    );
+
+    let tool = snap.messages[3].tool.as_ref().expect("工具卡");
+    assert_eq!(tool.error.as_deref(), Some("权限不足"), "失败原因要留下");
+    assert_eq!(
+        snap.messages[3].error.as_deref(),
+        Some("权限不足"),
+        "行级 error 与卡片一致（导出/查询只认一列）"
+    );
+    assert!(
+        tool.meta.is_some(),
+        "原样 meta 要留（库里存全文，不止行数摘要）"
+    );
+    assert_eq!(tool.diffs[0].added, 2, "diffs 仍按行数折叠（meta 的投影）");
+
+    // 统计口径不变：只有 User/Assistant 占「消息数」（注入/尝试不算对话消息）。
+    assert_eq!(snap.stats.messages, 1);
+}
+
+/// 重试折成 Notice，并且**带失败原因**（用户要「失败原因也记」）。
+#[test]
+fn retry_notice_carries_failure_reason() {
+    let mut folder = Folder::new();
+    feed(
+        &mut folder,
+        &frame(
+            "llm/retry",
+            1,
+            json!({
+                "mode": "normal",
+                "retryId": "r1",
+                "turn": 1,
+                "step": 1,
+                "provider": "deepseek-official",
+                "policyKey": "k",
+                "retry": 1,
+                "maxRetries": 5,
+                "delayMs": 2000,
+                "failure": { "message": "上游 503", "code": "HTTP_503" },
+            }),
+        ),
+    );
+    let snap = folder.snapshot();
+    let row = &snap.messages[0];
+    assert_eq!(row.kind, MsgKind::Notice);
+    assert!(row.text.contains("重试"), "文案：{}", row.text);
+    assert_eq!(
+        row.error.as_deref(),
+        Some("HTTP_503: 上游 503"),
+        "失败原因要单独一列（可筛可导出）"
+    );
+}
+
+/// 等待可见：`request/header` / `request/context` 必须折进快照。
+///
+/// 为什么这条是契约而不是细节：发完 prompt 到首个模型产出之间可以安静几十秒，
+/// 而 engine 只在**快照有变化**时发事件。这两个事件此前都折成 `{}` → 快照无变化 → UI 收不到
+/// 任何东西（用户看到「点了发送之后一片静止」，分不清在等模型还是卡死了）。
+/// 折进来之后，「等待」这段没有事件的时间在数据层就有迹可循。
+#[test]
+fn model_request_is_visible_in_snapshot() {
+    let mut folder = Folder::new();
+
+    // 路由元数据（provider/model/上下文窗口）：不随每次请求重发，来了就留住。
+    feed(
+        &mut folder,
+        &frame(
+            "request/context",
+            1,
+            json!({
+                "provider": "deepseek-official",
+                "model": "deepseek-v4-flash",
+                "contextWindow": 128000,
+            }),
+        ),
+    );
+    let snap = folder.snapshot();
+    assert_eq!(
+        snap.last_request.provider.as_deref(),
+        Some("deepseek-official")
+    );
+    assert_eq!(
+        snap.last_request.model.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(snap.last_request.context_window, Some(128_000));
+    assert_eq!(
+        snap.last_request.started_at, None,
+        "只收到路由元数据时不能假装「正在等待」"
+    );
+
+    // 请求发起（request/header）：起点时刻 / seq / 原因 / 工具数。
+    feed(
+        &mut folder,
+        &frame(
+            "request/header",
+            2,
+            json!({
+                "header": { "config": {}, "tools": [{ "name": "read" }, { "name": "edit" }] },
+                "reason": "initial",
+            }),
+        ),
+    );
+    let snap = folder.snapshot();
+    assert_eq!(snap.last_request.started_at, Some(TIME_BASE + 2));
+    assert_eq!(snap.last_request.seq, Some(2));
+    assert_eq!(snap.last_request.reason.as_deref(), Some("initial"));
+    assert_eq!(snap.last_request.tools, Some(2));
+
+    // 后续请求只更新「本次请求」的字段：路由元数据留着，工具数按本次如实重算。
+    feed(
+        &mut folder,
+        &frame(
+            "request/header",
+            5,
+            json!({ "header": { "config": {} }, "reason": "series" }),
+        ),
+    );
+    let snap = folder.snapshot();
+    assert_eq!(snap.last_request.seq, Some(5));
+    assert_eq!(snap.last_request.reason.as_deref(), Some("series"));
+    assert_eq!(snap.last_request.started_at, Some(TIME_BASE + 5));
+    assert_eq!(
+        snap.last_request.tools, None,
+        "本次请求头没带 tools → 留 None（不能沿用上一次的值，否则误导）"
+    );
+    assert_eq!(
+        snap.last_request.model.as_deref(),
+        Some("deepseek-v4-flash"),
+        "路由元数据属于会话级，不该被请求级更新清掉"
+    );
+}
+
 /// 空快照的基线：`Folder::new()` 产出的快照没有会话 id、没有状态——engine 靠它判断「有没有接过通知」。
 #[test]
 fn empty_snapshot_baseline() {

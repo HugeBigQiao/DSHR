@@ -19,7 +19,8 @@ use dsh_sdk_protocol::llm::TokenUsage;
 use dsh_sdk_protocol::notifications::SessionStatus;
 
 use dshr_state::snapshot::{
-    FileDiff, MsgItem, MsgKind, SessionSnapshot, SessionStats, ToolItem, TurnStat, UsageAgg,
+    FileDiff, MsgItem, MsgKind, RequestView, SessionSnapshot, SessionStats, ToolItem, TurnStat,
+    UsageAgg,
 };
 use dshr_state::store::Store;
 
@@ -34,6 +35,10 @@ fn user_row(seq: u64, text: &str) -> MsgItem {
         tool: None,
         time: 1_700_000_000_000 + seq,
         seq,
+        turn: Some(1),
+        step: Some(1),
+        source: "user".to_string(),
+        error: None,
     }
 }
 
@@ -52,6 +57,16 @@ fn tool_row(seq: u64, call_id: &str, name: &str, is_error: bool) -> MsgItem {
             duration_ms: 12,
             is_error,
             result: Some("已改好".to_string()),
+            // 失败原因：即便这一次是成功的示例，也把字段填上以覆盖落库/复原往返。
+            error: if is_error {
+                Some("工具执行失败：permission denied".to_string())
+            } else {
+                None
+            },
+            // 原样 meta（库里存全文，diffs 只是它的投影——复原时由它重算，见 load_snapshot）。
+            meta: Some(serde_json::json!({
+                "diffs": [{ "path": "src/lib.rs", "oldText": "a\nb", "newText": "a\nb\nc" }],
+            })),
             diffs: vec![FileDiff {
                 path: "src/lib.rs".to_string(),
                 added: 3,
@@ -60,6 +75,15 @@ fn tool_row(seq: u64, call_id: &str, name: &str, is_error: bool) -> MsgItem {
         }),
         time: 1_700_000_000_000 + seq,
         seq,
+        turn: Some(1),
+        step: Some(1),
+        source: "model".to_string(),
+        // 行级 error 与卡片里的 error 由 fold 同时写入（`on_tool_result`），这里保持一致。
+        error: if is_error {
+            Some("工具执行失败：permission denied".to_string())
+        } else {
+            None
+        },
     }
 }
 
@@ -74,6 +98,10 @@ fn assistant_row(seq: u64, text: &str, usage: TokenUsage) -> MsgItem {
         tool: None,
         time: 1_700_000_000_000 + seq,
         seq,
+        turn: Some(1),
+        step: Some(1),
+        source: "model".to_string(),
+        error: None,
     }
 }
 
@@ -114,6 +142,18 @@ fn snapshot_v1(session: &str) -> SessionSnapshot {
             tool_ms: 0,
             errors: 1,
         },
+        // 复原要覆盖的会话级事实：模式开关与最近一次模型请求（含 provider/model）。
+        plan_mode: true,
+        sandbox_mode: Some("workspace-write".to_string()),
+        last_request: RequestView {
+            started_at: Some(1_700_000_000_001),
+            seq: Some(1),
+            reason: Some("initial".to_string()),
+            tools: Some(12),
+            provider: Some("deepseek-official".to_string()),
+            model: Some("deepseek-chat".to_string()),
+            context_window: Some(128_000),
+        },
         turns: vec![TurnStat {
             turn: 1,
             start_time: Some(1_700_000_000_001),
@@ -141,6 +181,9 @@ fn snapshot_v2(session: &str) -> SessionSnapshot {
             tool_ms: 0,
             errors: 0,
         },
+        last_request: Default::default(),
+        plan_mode: false,
+        sandbox_mode: None,
         turns: Vec::new(),
         messages: vec![user_row(9, "只剩这一条")],
     }
@@ -215,6 +258,43 @@ fn empty_session_id_is_rejected() {
         store.session_summaries().expect("查询").is_empty(),
         "被拒绝的落库不该留下任何行"
     );
+}
+
+/// **复原往返**：`persist_snapshot` → `load_snapshot` 必须与原始快照**逐字段相等**。
+///
+/// 为什么这是核心契约（用户 2026-09-29 要求「会话跑到一定数量后关掉、打开还能复原记录」）：
+/// 复原的正确判据不是「读回来有点像」，而是「读回来一样」——只要不等，就说明某个字段在
+/// 落库或读回时丢了语义（本项目实测过的例子：把 adapter **未报**的 token 桶写成 0，
+/// 读回就从「未知」变成「0」；所以六桶列可空，NULL 与 0 语义不同）。
+#[test]
+fn restore_roundtrip() {
+    let store = Store::open_in_memory().expect("内存库");
+    let snap = snapshot_v1("s-restore");
+    store.persist_snapshot(&snap).expect("落库");
+
+    let back = store
+        .load_snapshot("s-restore")
+        .expect("读回应成功")
+        .expect("应有该会话");
+    assert_eq!(
+        back, snap,
+        "复原必须逐字段相等（含 turn/step/source/error/meta/模式/请求）"
+    );
+
+    // 目录：复原列表按最后更新倒序（最近用过的在前）。
+    store
+        .persist_snapshot(&snapshot_v1("s-older"))
+        .expect("再落一个");
+    let ids = store.load_session_ids().expect("列会话");
+    assert_eq!(ids.len(), 2, "{ids:?}");
+}
+
+/// 库里没有这个会话 → `None`（而不是造一个空快照出来，那会让 UI 以为会话存在）。
+#[test]
+fn restore_missing_session_is_none() {
+    let store = Store::open_in_memory().expect("内存库");
+    assert!(store.load_snapshot("s-不存在").expect("读回").is_none());
+    assert!(store.load_session_ids().expect("列会话").is_empty());
 }
 
 /// 一个库可并存多个会话（多 runtime / 多会话是产品能力，库必须按 session_id 隔离）。

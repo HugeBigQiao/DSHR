@@ -350,6 +350,37 @@ impl Engine {
         }
     }
 
+    /// 记一条协议请求事实（落 `requests` 表；库未开或写失败都只打一行 stderr，不阻断会话）。
+    ///
+    /// 为什么吞掉错误：落库是**观测**，不该让一次统计写入失败影响用户正在做的事
+    /// （与 `take_changed` 里「落库失败不打断会话」同一条原则）。
+    fn record_request(
+        &self,
+        id: &RuntimeId,
+        session: &SessionId,
+        method: &str,
+        time: u64,
+        duration_ms: u64,
+        success: bool,
+        error: Option<&str>,
+    ) {
+        let Some(db) = self.store.as_ref() else {
+            return;
+        };
+        if let Err(e) = db.append_request(
+            session.as_str(),
+            id.as_str(),
+            None,
+            method,
+            time,
+            duration_ms,
+            success,
+            error,
+        ) {
+            eprintln!("[engine] 记录请求事实失败（忽略）：{e}");
+        }
+    }
+
     /// 命令分发。
     async fn on_cmd(&mut self, cmd: EngineCmd) -> Vec<EngineEvent> {
         match cmd {
@@ -357,6 +388,64 @@ impl Engine {
             EngineCmd::StopRuntime { id } => self.stop_runtime(id).await,
             EngineCmd::ResetSession { id } => self.reset_session(id),
             EngineCmd::Prompt { id, session, text } => self.prompt(id, session, text).await,
+            EngineCmd::ReadSnapshot { session } => self.read_snapshot(&session),
+            EngineCmd::ListSessions => self.list_sessions(),
+        }
+    }
+
+    /// **按需拉取**一份快照：运行中的会话优先，否则从库里复原（M6 的 B 方案入口）。
+    ///
+    /// 三个边界（都写在实现里，避免后来者误改）：
+    /// - **只读**：不脏检测、不落库、不改状态——「拉」不该有副作用（落库由变更路径负责）；
+    ///   所以这里用 `SessionState::snapshot()` 而不是 `take_changed()`。
+    /// - **不缓存历史态**：从库读几百行是毫秒级，缓存反而引入失效问题（会话可能又被跑起来）；
+    ///   真成瓶颈时再加 LRU，那时也才知道该按什么淘汰。
+    /// - **找不到就静默**：不造空快照（那会让 UI 以为会话存在且是空的），也不报错
+    ///   （目录由 `ListSessions` 提供，UI 选到的 id 必然来自目录或事件）。
+    fn read_snapshot(&mut self, session: &SessionId) -> Vec<EngineEvent> {
+        if session.as_str().is_empty() {
+            return Vec::new();
+        }
+        // ① 运行中：在注册表里按会话 id 找（一个 runtime 内可并存多会话）。
+        for (id, slot) in &self.runtimes {
+            if let Some(state) = slot.sessions.get(session) {
+                return vec![EngineEvent::SessionLoaded {
+                    session: session.clone(),
+                    runtime: Some(id.clone()),
+                    snapshot: Box::new(state.snapshot()),
+                }];
+            }
+        }
+        // ② 库里复原：会话早已结束（或本次应用刚启动）。
+        let Some(db) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        match db.load_snapshot(session.as_str()) {
+            Ok(Some(snapshot)) => vec![EngineEvent::SessionLoaded {
+                session: session.clone(),
+                runtime: None,
+                snapshot: Box::new(snapshot),
+            }],
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                // 读库失败不是会话错误：报一行 stderr 并当「没有」处理（UI 侧看到的是没变化）。
+                eprintln!("[engine] 拉取快照失败（忽略）：{e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// 列出库里的会话目录（§8.3 聚合：轮/token/工具/错误/标题）。
+    fn list_sessions(&mut self) -> Vec<EngineEvent> {
+        let Some(db) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        match db.session_summaries() {
+            Ok(rows) => vec![EngineEvent::Sessions { rows }],
+            Err(e) => {
+                eprintln!("[engine] 列出会话目录失败（忽略）：{e}");
+                Vec::new()
+            }
         }
     }
 
@@ -470,15 +559,49 @@ impl Engine {
             };
             slot.runtime.is_fake()
         };
+        // 计时包住真正的发送：`requests` 表要的是「宿主发一次请求花了多久、成不成」
+        //（wire 事件里没有这个信息——失败时连响应都没有）。
+        let started = now_epoch_ms();
         let send = {
             let Some(slot) = self.runtimes.get_mut(&id) else {
                 return Vec::new();
             };
             slot.runtime.prompt(&text).await
         };
+        let elapsed = now_epoch_ms().saturating_sub(started);
         if let Err(e) = send {
-            return self.teardown(&id, format!("prompt 发送失败：{e}"));
+            // ① 请求事实：失败也留痕（含原因），这是监控页「成功率/失败原因」的数据源。
+            self.record_request(
+                &id,
+                &session,
+                "session/prompt",
+                started,
+                elapsed,
+                false,
+                Some(&e.to_string()),
+            );
+            // ② 会话里留一条**可见**记录，并立刻发快照（先落库再发，见 take_changed 注释）——
+            // 这样「发送失败：<原因>」既在 UI 上看得见，也在库里查得到（用户明确要求）。
+            let mut out = Vec::new();
+            if let Some(state) = self.session_mut(&id, &session) {
+                state.push_local_notice(format!("发送失败：{e}"), Some(e.to_string()));
+            }
+            if let Some(ev) = self.emit_changed(&id, &session) {
+                out.push(ev);
+            }
+            out.extend(self.teardown(&id, format!("prompt 发送失败：{e}")));
+            return out;
         }
+        // 成功也记一行：耗时分布是监控页最有用的指标之一。
+        self.record_request(
+            &id,
+            &session,
+            "session/prompt",
+            started,
+            elapsed,
+            true,
+            None,
+        );
         // Fake runtime 不回发 user/message → 本地补一行，否则 UI 看不到用户说过的话。
         if is_fake {
             if let Some(state) = self.session_mut(&id, &session) {

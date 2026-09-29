@@ -98,6 +98,22 @@ impl SessionState {
             }));
     }
 
+    /// 追加一条**本地**记录（宿主侧事实，wire 上没有对应事件）：如「发送失败：<原因>」。
+    ///
+    /// 为什么由 engine 主动写：请求根本没送到 runtime 时不会有任何 wire 事件替我们记，
+    /// 而用户明确要求「哪怕对话发送失败了，失败原因也要记」——同时它还会跟着快照落库、发 UI，
+    /// 于是「失败」既有可见的一行，也有可查的一列。
+    pub fn push_local_notice(&mut self, text: String, error: Option<String>) {
+        if self.id.as_str().is_empty() {
+            return;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.folder.push_local_notice(now, text, error);
+    }
+
     /// 补一条本地用户消息行（Fake 模式专用，见 `Runtime::synth_user_message`）。
     pub fn push_local_user_message(&mut self, text: &str) {
         self.seq += 1;

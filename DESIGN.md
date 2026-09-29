@@ -308,15 +308,15 @@ dshr/
 │   │   ├── lib.rs            # 分层说明 + 模块清单
 │   │   ├── raw.rs  raw/      #   与 SDK 沟通（Runtime + mode + driver/client_driver）
 │   │   ├── engine.rs engine/ #   核心数据处理（M3 落地；当前为 raw 的再出口）
-│   │   ├── fold.rs fold/     #   纯投影（Folder + event / render / tests）
-│   │   ├── snapshot.rs       #   fold 的输出类型（UI 模型）
-│   │   ├── store.rs store/   #   sqlite 加工库（门面 + error/schema/convert/write/tests）
+│   │   ├── fold.rs fold/     #   纯投影（Folder + event / render）
+│   │   ├── snapshot.rs       #   fold 的输出类型（UI 模型；含 last_request）
+│   │   ├── store.rs store/   #   sqlite 加工库（门面 + error/schema/convert/write）
+│   │   ├── export.rs         #   CSV 导出（库表 + 跨会话历史回放；监控页导出先行）
 │   │   ├── record.rs         #   WireLog 装载
 │   │   ├── runtime.rs        #   runtime 获取（锁版本 pnpm install --ignore-scripts）
 │   │   ├── config.rs         #   配置加载（config.json）
 │   │   ├── secrets.rs        #   API key（data/secrets.json，Unix 0600）
-│   │   ├── workspace.rs      #   工作区文件读写（仅限相对路径）
-│   │   ├── session.rs        #   ⚠️ 待删（M4）：与 raw 重复的全链路入口
+│   │   └── workspace.rs      #   工作区文件读写（仅限相对路径）
 │   │   └── main.rs           #   可执行入口（全链路运行 + 记录汇总）
 │   └── README.md             # 本 crate 的组成结构与依赖关系
 │
@@ -397,8 +397,23 @@ UI ◀─EngineEvent── engine ◀──wire 级事件──── raw
                      └─▶ store::Store（落库：会话/turn/工具/文件/审计）
 ```
 
-读取模型（M6 定的 **B 方案**）：engine 持快照缓存，事件只发轻量变更通知，UI 按需读快照
-（避免多会话下整份 clone 的开销）。
+读取模型（M6 定的 **B 方案**：拉 + 变更通知）：engine 持快照缓存，事件只发轻量变更通知，
+UI 按需读快照（避免多会话下整份 clone 的开销）。
+
+**落地状态（2026-09-29）**：
+
+- ✅ **「拉」这一半已完成**：`EngineCmd::ReadSnapshot { session }` → `EngineEvent::SessionLoaded
+  { session, runtime: Option<RuntimeId>, snapshot }`；`EngineCmd::ListSessions` →
+  `EngineEvent::Sessions { rows }`（库里的聚合目录，§8.3）。
+  查找顺序 = **运行中优先 → 库里复原**（`Store::load_snapshot`），所以「打开历史会话」
+  与「切到当前会话」用的是同一条路径、同一个事件形状。
+  三个边界：**只读**（不脏检测、不落库——落库由变更路径负责）、**历史态不缓存**
+  （读几百行是毫秒级，缓存反而引入失效问题）、**找不到就静默**（不造空快照）。
+- ⬜ **「只发轻通知」这一半与 UI 同批做**（M5）：执行者（engine 停发整份快照、改发
+  `SnapshotChanged`）与消费者（UI 收到通知后发 `ReadSnapshot`）**必须同时改**——
+  只改一侧的结果是界面静止（推送没了而没人去拉），而静默正是本项目最贵的失败形态。
+  切换时 `SessionLoaded` 的应用逻辑已经就位（`dshr-ui/src/app.rs` 与推送快照走同一段），
+  只需再加上「收到轻通知 → 发 ReadSnapshot」这条回路。
 
 ### 7.3 UI 层
 
@@ -424,6 +439,7 @@ App::update ── Message 分发：
 | `data/secrets.json` | dshr 敏感 | api-key（0600，不入 git） |
 | `data/dsh-home/` | dsh runtime（**不碰**） | profiles / sessions / storages / 匿名 id |
 | `data/wire-logs/` | dshr 记录 | 全程 JSONL（**lossless 源**） |
+| `data/exports/` | dshr 导出 | CSV 导出产物（`DSHR_EXPORT=1` 真跑；可整目录删除） |
 | `data/.pnpm-store/` | pnpm 缓存 | 安装 store |
 
 原则：**db 只含 dshr 自己的加工数据**；dsh 的会话/storages 留在 `dsh-home/`。
@@ -432,19 +448,36 @@ App::update ── Message 分发：
 
 | 表 | 内容 | 写入方 |
 |---|---|---|
-| `runtimes` | id/name/state/created/command/args/cwd/env | 待做（多 runtime 管理） |
-| `sessions` | id/runtime_id/cwd/parent/created/status/title/last_seq | ✅ fold 快照 |
-| `requests` | runtime/session/turn/method/time/duration_ms/success/error_message | 待做（请求层折叠） |
+| `runtimes` | id/name/state/created/command/args/cwd/env | ✅ engine（启动/退出）；command/args/cwd/env 留位 |
+| `sessions` | id/runtime_id/cwd/parent/created/status/title/last_seq + **`meta_json`**（复原用聚合） | ✅ fold 快照（+ `ensure_session` 壳行） |
+| `requests` | session/runtime/turn/method/time/duration_ms/success/**error_message** | ✅ engine（每次 prompt，含失败） |
+| `messages` | **逐条对话事实**：turn/step/kind/source/text/reasoning/**error**/token 六桶/流摘要/工具全文（含 arguments 与原样 meta） | ✅ fold 快照 |
 | `turns` | turn_id/session/turn/started/ended/duration/reason + token 六桶列 | ✅ fold 快照 |
-| `tool_calls` | call_id/name/arguments/result_text/is_error/duration_ms/meta | ✅ fold 快照 |
-| `file_ops` | session/turn/time/path/op/lines_added/lines_removed | ✅ 自 `meta.diffs` 折叠 |
-| `runtime_logs` | runtime stderr 行（审计） | 待做（engine 消费 stderr） |
+| `tool_calls` | call_id/name/arguments/result/is_error/duration_ms/**error**/meta_json | ✅ fold 快照 |
+| `file_ops` | session/turn/time/path/op/lines_added/lines_removed | ✅ 自 `meta.diffs` 折叠（turn 已能填） |
+| `runtime_logs` | runtime stderr 行（审计） | ✅ engine 消费 stderr |
 
-**不建 events 全量表**：wire-logs JSONL 已是 lossless 源，重放即查询；
-避免双写与体积。按 (session,type) 扫描走 WireLog 重放，确有热点再加窄表。
+**落库粒度原则（2026-09-29 用户要求后定）**：**除逐 chunk 之外全部落库**——
+消息（含程序化注入与未提交的尝试）、每条工具调用及其**失败原因**、每轮的结算与 token、
+宿主发出的每次请求（耗时/成败/原因）。原文类字段**不截断**（截断只发生在渲染层），
+逐 chunk 仍只留流摘要（`stream_*` 七列），与 §8.3 的统计域一致。
+
+**仍然不建 events 全量表**：wire-logs JSONL 已是 lossless 原始源，事件级重放走它；
+但要分清「事件」与「事实」——**事件不逐条落库，消息/轮/工具/请求这些事实必须落库**，
+因为它们是查询与复原的对象（不是日志的副本）。
 
 **写入语义 = 会话整体重放**：`persist_snapshot` 一个事务内 UPSERT `sessions` +
-DELETE+INSERT `turns`/`tool_calls`/`file_ops`，同一快照重复 persist 行数不变（幂等）。
+DELETE+INSERT `messages`/`turns`/`tool_calls`/`file_ops`，同一快照重复 persist 行数不变（幂等）。
+
+**schema 版本与迁移**：`PRAGMA user_version` 记录版本（当前 2），加列走
+`schema::MIGRATIONS_V2` 的「先探测后 ALTER」（幂等）。**用户的历史会话在库里**，
+所以升级不能靠删库（§8.1 的「data/ 可整体删除」是兜底不是流程）。
+
+**复原（关掉再打开）**：`Store::load_snapshot(session_id)` 用 `messages` + `turns` +
+`sessions.meta_json` 重建完整快照；`load_session_ids()` 给出目录（按最后更新倒序）。
+契约测试 `tests/store_persistence.rs::restore_roundtrip` 断言**逐字段相等**——
+不等就说明某个字段在落库或读回时丢了语义（实测例子：把 adapter **未报**的 token 桶写成 0，
+读回就从「未知」变成「0」；所以六桶列可空）。
 
 ### 8.3 统计域（含 stream 摘要，**不保留逐 chunk**）
 
@@ -475,7 +508,12 @@ fold（纯函数，可测）      ──► 内存快照：消息流 / turn 统�
 ```
 
 - fold 与落库**同源同巡**；**离线模式**：WireLog 回放走同一 fold（UI 开发/回归用，
-  不 spawn runtime、不烧 token）。
+ 不 spawn runtime、不烧 token）。
+- **导出**（`dshr-state/src/export.rs`，2026-09-29）：库表 → CSV（显式列序 + 稳定排序）、
+  wire-log → **按会话分组回放**出逐条历史。它是监控页历史导出的先行实现，
+  入口暂时是门控测试（`DSHR_EXPORT=1`），见 AI-LOG §4.8。
+  实测差异值得记住：wire-log 回放出 42 个会话，而库里只有 3 行 session——**历史的全集在 wire-log**，
+  库是「引擎跑过并落盘过的」加工结果（§4.5 的历史索引议题就建在这个事实之上）。
 
 ---
 
@@ -510,6 +548,8 @@ fold（纯函数，可测）      ──► 内存快照：消息流 / turn 统�
 9. **三层：raw / engine / fold**（2026-09-28 定）。理由与边界见 §3。
 10. **`SessionDriver` trait 粒度 = runtime 级**，暴露三进四出 + stderr + 退出信号（§3.5）。
 11. **快照读取用 B 方案**（拉 + 变更通知）：engine 持快照缓存，事件只发轻通知（§7.2）。
+    拉取侧已落地（`ReadSnapshot`/`SessionLoaded`/`ListSessions`/`Sessions`）；
+    轻通知的**切换**与消费侧同批做（M5，理由见 §7.2）。
 12. **落盘完整性原则**（§3.6）：逐 chunk 不落盘、改为按会话记录完整 chunk 序列；
     stderr 与进程退出必须落盘。
 13. **`session.rs` 删除**（推迟到 M4）：它用的 `HarnessClient::run()` 语义当前 engine 接口没有，
@@ -569,6 +609,11 @@ fold（纯函数，可测）      ──► 内存快照：消息流 / turn 统�
   总线循环（`dshr-ui/src/bridge.rs`）空转烧掉一个核（界面上毫无异常）。
   实测覆盖：`dshr-state/tests/engine_flow.rs` 的 `no_runtime_waits_for_command`。
   触发条件常见：程序刚启动（还没 StartRuntime）、用户停掉最后一个 runtime。
+- **子表外键要求父行先存在，而落库失败的信号非常弱**：`requests.session_id` 引用 `sessions(id)`，
+  但**第一次 prompt 时该会话还没落过任何快照**（快照要等事件回来）→ 直接插请求行会
+  `FOREIGN KEY constraint failed`；而 engine 的落库错误是「打一行 stderr 就继续」，
+  于是在测试里表现为「表是空的」——与「表根本没有写入方」表面一模一样（本项目在 `runtime_logs`
+  上踩过同类）。对策：`Store::ensure_session` 幂等补壳行（见 §8.2）。
 - **审批/询问流在 SDK 通道是死的**：`ask_user_question` 无 provider 转发；通知面固定 4 种，
   审批要 runtime 侧 TS 插件转发 `ctx.approval`。
 - **`web_fetch` 默认禁用**（SSRF 未防护），`web_search` 可用（60s 超时）。
@@ -617,8 +662,9 @@ fold（纯函数，可测）      ──► 内存快照：消息流 / turn 统�
 | M3.5 UI 骨架 | 三页 + 侧边栏树 + 对话 + 覆盖菜单 + 窗口控制 | **完成** |
 | M3.6 UI 接真实数据 | bridge 接 state（真 runtime + 真记录 + 落库） | **完成** |
 | M3.7 配置页 Zed 化 | 分区导航 + 分组表单 | **完成** |
-| **S1 state 分层** | raw/engine/fold 三层（M1 改名、M1.5 store 拆分、M2 SessionDriver、M3 新 engine 已完成） | **进行中**（M4 部分完成；M5 UI 多 runtime、M6 快照 B 方案 待做） |
-| **S3 契约测试重建** | 按「各 crate 一个 `tests/`」重建（§12.4） | **进行中**（3/5 项完成：state × 3 文件 + protocol × 2 文件，31 条绿） |
+| **S1 state 分层** | raw/engine/fold 三层（M1 改名、M1.5 store 拆分、M2 SessionDriver、M3 新 engine 已完成） | **进行中**（M4 部分完成；**M6 数据面完成**；M5 UI 多 runtime、M6 的轻通知切换 待做） |
+| **S3 契约测试重建** | 按「各 crate 一个 `tests/`」重建（§12.4） | **进行中**（3/5 项完成：state × 4 文件 + protocol × 2 文件，45 条绿） |
+| **S4 落盘数据做细 + 可达** | 逐条对话落库（除逐 chunk）、失败原因、CSV 导出、**关掉再打开可复原** | **数据侧完成**（`messages` 表 + `export.rs` + `load_snapshot` + `requests` 写入方；UI 侧待 M5） |
 | S2 数据管道完善 | stderr/退出落盘、多会话路由、B 方案读取 | 未开始 |
 | M4 发布 | crate 打包 + README + 生态目录 | 未开始（用户暂缓） |
 | M3.8 监控页 | §8.3 read 聚合 + 页面 | 未开始 |
@@ -633,7 +679,7 @@ fold（纯函数，可测）      ──► 内存快照：消息流 / turn 统�
 | **M3 ✅** | 新 `engine.rs`：runtime 注册表 + 每会话态；搬入脏检测/落库；**stderr 与退出落盘接通**（`runtime_logs` / `runtimes` 表首次有写入方）；`record::Recorder` 重新接入（app 轨迹 + 线级记录同源） | 5 条 engine 集成测试（假 driver，不起进程）：主链路/会话重置/多 runtime 路由隔离/退出上报/stderr 落库（67 通过） |
 | M4 | raw 只留进程与协议 → 改发 wire 级事件批（带标） | 部分已完成：`raw.rs` 已是纯进程句柄（442 行）、`session.rs` 已删除、WireLog 路径已归 engine 管理 |
 | M5 | UI bridge 换到新 `EngineCmd`/`EngineEvent`（加 runtime/session 标） | UI 手验 |
-| M6 | 快照读取改 B 方案 | UI 手验 + engine 单测 |
+| M6 | 快照读取改 B 方案（拉 + 变更通知） | **数据面 ✅**：`ReadSnapshot`/`SessionLoaded`/`ListSessions`/`Sessions` + 3 条 engine 单测（运行中拉取 / 库里复原 / 目录）。**轻通知切换待 M5**（见 §7.2） |
 
 ### 12.3 其它待办
 
@@ -644,15 +690,16 @@ fold（纯函数，可测）      ──► 内存快照：消息流 / turn 统�
 
 ### 12.4 测试策略（2026-09-29 调整）
 
-**现状（2026-09-29 更新）：重建进行中，已落地 31 条契约测试**（`cargo test --workspace` 全绿）：
+**现状（2026-09-29 更新）：重建进行中，已落地 45 条契约测试**（`cargo test --workspace` 全绿）：
 
 | crate | 文件 | 条数 | 覆盖 |
 |---|---|---|---|
 | `dsh-sdk-protocol` | `tests/event_catalog.rs` | 5 | 事件全集对账（对锁定快照）+ 降级识别（`degraded_event`）+ merge-extensible 兜底 |
 | `dsh-sdk-protocol` | `tests/frame_shape.rs` | 6 | **真实录制帧**的形状对账 + 20 种消息来源建模（含漂移容忍）+ 内容块 roundtrip + 请求面/信封 |
-| `dshr-state` | `tests/engine_flow.rs` | 7 | engine 主链路（prompt→通知→折叠→落库）、多 runtime 路由隔离、stderr/退村落盘、**空注册表不空转**、**降级写入 app 轨迹** |
-| `dshr-state` | `tests/fold_projection.rs` | 7 | fold 投影语义（消息序/工具配对/token/轮结算/错误口径 + **在线与回放同源同巡**） |
-| `dshr-state` | `tests/store_persistence.rs` | 4 | 落库幂等、替换语义、空 session_id 拒绝、多会话隔离 |
+| `dshr-state` | `tests/engine_flow.rs` | 11 | engine 主链路、多 runtime 路由隔离、stderr/退村落盘、空注册表不空转、降级写 app 轨迹、请求事实与失败可见、**按需拉取快照 / 库里复原 / 会话目录** |
+| `dshr-state` | `tests/fold_projection.rs` | 10 | 投影语义（消息序/工具配对/token/轮结算/错误口径）+ 在线与回放同源同巡 + 模型请求可见 + **行级 turn/step/source/error 与注入/尝试成行** |
+| `dshr-state` | `tests/store_persistence.rs` | 6 | 落库幂等、替换语义、空 session_id 拒绝、多会话隔离、**复原往返（逐字段相等）**、缺失会话为 None |
+| `dshr-state` | `tests/export_csv.rs` | 5 | CSV 转义、八张表导出、跨会话回放分组、全量导出落盘 + 复原抽查（`DSHR_EXPORT=1` 真跑） |
 | `dshr-state` | `tests/engine_session.rs` | 2 | 真实会话逐步透明账本（`DSHR_LIVE=1`）+ 冷启动负例 |
 
 `dsh-sdk-client`（帧层/配对/超时，需 node fixture）与 `dshr-ui`（纯映射函数）**尚未重建**。
@@ -737,13 +784,23 @@ optional**，无法裁剪）。
 **不做打包归档**：用户明确要求「不在仓库里打包一个，还是通过 pnpm 下载构建」——
 所以不引入"预热归档 + 校验 + 解压"那条路。
 
-#### 待办：等待模型期间没有心跳
+#### 等待模型期间没有反馈（数据侧 ✅ 已做 / UI 侧待做）
 
 M3 实测暴露的产品问题：engine 只在**状态有变化**时发事件。发完 prompt 后直到 runtime
 返回首条事件之前，`engine.next()` 安静等待——真实 LLM 首字节延迟可达几十秒，
 UI 上表现为「点了发送之后一片静止」，用户无法区分「在等模型」与「卡死了」。
-建议加一个「正在等待模型」的周期心跳（或把 `request/header` 这类中间事件折成
-一行状态提示）。**注意区分两类等待**：等本地事件（毫秒级）与等真实 API（可达分钟级），
+
+**根因（不是缺定时器）**：`request/header` 与 `request/context` 此前都折成 `{}`，
+折完快照没变化 → 脏检测判定「无变化」→ **UI 根本收不到通知**。
+
+**数据侧修法（2026-09-29 已落地）**：两个事件折进 `SessionSnapshot.last_request`
+（起点时刻 / seq / 追加原因 / 工具数 + provider / model / 上下文窗口）。
+语义上「等待」= 已发起请求（`started_at` 有值）且尚无对应产出 —— UI 用
+`last_request.seq` 与最后一条 assistant 行的 seq 比较即可判定，`started_at` 用来显示
+「已等待 N 秒」。测试见 `tests/fold_projection.rs::model_request_is_visible_in_snapshot`。
+
+**UI 侧待做**：状态栏显示「正在等待 <model> · Ns」（属 M5 那一轮）。
+**注意区分两类等待**：等本地事件（毫秒级）与等真实 API（可达分钟级），
 测试里的单步超时必须分开设（本项目在这里误判过两次）。
 
 #### 三条踩过的坑（重建前先读）

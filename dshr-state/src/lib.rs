@@ -20,6 +20,7 @@
 //!   raw       与 SDK 沟通（原 engine；`Runtime` 一个实例 = 一个 runtime 子进程）
 //!   engine    核心数据处理（类型层 + `engine::Engine`：多 runtime 注册表 / 路由 / 落库）
 //!   fold      纯投影：会话事件流 → 内存快照（UI 只消费它产出的 snapshot）
+//!   export    落盘数据的 CSV 导出（库表 + 跨会话历史回放；监控页历史导出的先行实现）
 //!   snapshot  fold 的输出类型（UI 模型；engine 只搬运不解释）
 //!   record    全程记录（一个 JSONL：cat=dsh 细到 event / cat=app 分开）
 //!   runtime   runtime 获取（锁版本 pnpm install）
@@ -31,6 +32,7 @@
 //!（独立全链路自跑入口）已删除：它的驱动逻辑与 `raw` 重复，且经 UI 启动即可覆盖同一路径。
 pub mod config;
 pub mod engine;
+pub mod export;
 pub mod fold;
 pub mod raw;
 pub mod record;

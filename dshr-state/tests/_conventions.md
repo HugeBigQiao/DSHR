@@ -7,9 +7,10 @@
 
 | 文件 | 条数 | 覆盖 |
 |---|---|---|
-| `engine_flow.rs` | 7 | engine 主链路（prompt→通知→折叠→落库）、多 runtime 路由隔离、stderr/退村落盘、**空注册表不空转**、帧形状自检、**降级写入 app 轨迹**（`event.degraded`） |
-| `fold_projection.rs` | 7 | fold 投影语义（消息序/工具配对/token/轮结算/错误口径）+ **在线与 WireLog 回放同源同巡** |
-| `store_persistence.rs` | 4 | 落库幂等、替换语义、空 `session_id` 拒绝、多会话隔离 |
+| `engine_flow.rs` | 11 | engine 主链路（prompt→通知→折叠→落库）、多 runtime 路由隔离、stderr/退村落盘、**空注册表不空转**、帧形状自检、**降级写入 app 轨迹**、**请求事实与发送失败可见**、**按需拉取（运行中/库里复原/会话目录）** |
+| `fold_projection.rs` | 10 | fold 投影语义（消息序/工具配对/token/轮结算/错误口径）+ **在线与 WireLog 回放同源同巡** + **模型请求可见** + **行级 turn/step/source/error 与注入/尝试成行** |
+| `store_persistence.rs` | 6 | 落库幂等、替换语义、空 `session_id` 拒绝、多会话隔离、**复原往返（逐字段相等）**、缺失会话为 `None` |
+| `export_csv.rs` | 5 | CSV 转义（RFC 4180）、**八张事实表**导出、**跨会话回放分组**、`export_all` 端到端、`DSHR_EXPORT=1` 真跑（含复原抽查） |
 | `engine_session.rs` | 2 | 真实会话逐步透明账本（`DSHR_LIVE=1`）+ 冷启动负例 |
 
 **还没测的**（重建优先级第 4/5 项是 client 与 ui；本 crate 内还缺的）：

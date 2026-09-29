@@ -108,6 +108,16 @@ fn render(evs: &[EngineEvent]) -> String {
             EngineEvent::SessionReset { session, .. } => format!("SessionReset(session={session})"),
             EngineEvent::Stopped { reason, .. } => format!("Stopped(reason={reason:?})"),
             EngineEvent::Failed { reason, .. } => format!("Failed(reason={reason:?})"),
+            EngineEvent::SessionLoaded {
+                session,
+                runtime,
+                snapshot,
+            } => format!(
+                "SessionLoaded(session={session}, 运行中={}, msgs={})",
+                runtime.is_some(),
+                snapshot.messages.len()
+            ),
+            EngineEvent::Sessions { rows } => format!("Sessions(rows={})", rows.len()),
         })
         .collect::<Vec<_>>()
         .join(" + ")
@@ -186,6 +196,8 @@ fn dump_messages(snap: &SessionSnapshot) {
             MsgKind::Reasoning => "reasoning",
             MsgKind::Tool => "tool",
             MsgKind::Notice => "notice",
+            MsgKind::Injected => "injected",
+            MsgKind::Attempt => "attempt",
         };
         let text: String = m.text.chars().take(70).collect();
         println!(

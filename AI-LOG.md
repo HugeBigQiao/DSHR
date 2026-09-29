@@ -45,8 +45,13 @@
 
 **测试重建中的阅读顺序**（2026-09-29）：`DESIGN.md` §12.4（现状 + 已落地清单 + 重建优先级）
 → 目标 crate 的 `tests/_conventions.md`（接缝清单）→ 本文件 §2.6（静默失败类陷阱）。
-**进度 3/5**：`dshr-state`（engine/fold/store）与 `dsh-sdk-protocol` 已重建（31 条绿）；
+**进度 3/5**：`dshr-state`（engine/fold/store/export）与 `dsh-sdk-protocol` 已重建（45 条绿）；
 剩下 `dsh-sdk-client`（帧层/配对/超时，需 node fixture）与 `dshr-ui`（纯映射函数）。
+
+**S1/S4 的当前进度**（2026-09-29）：M1–M3 已完成；**M6 的数据面完成**（按需拉取 + 库里复原，
+§4.9 有 M5 的逐条待办清单）；S4 数据侧完成（逐条落库 + 失败原因 + CSV 导出 + 关掉再打开可复原，
+§4.8）。**下一步是 M5（UI：多 runtime/多会话 + 轻通知切换 + 历史会话 + 等待可见显示）**——
+用户要求「UI 之前先把核心逻辑做完」，核心逻辑这条线现在没有前置债了。
 
 ### 1.3 代码注释规范（用户 2026-09-28 要求）
 
@@ -130,7 +135,7 @@ npm 上 `0.2.0-rc.1` 挂在 `next` 标签，`latest` 仍是 `0.1.7-rc.2`——**
    kind——只有 5 个，且形状都能从代码里逐条挖出来（不是猜）：
    `plan-mode` / `model-selection`（都是 `{kind, form:'notice', summary}`）、
    `user-approval` / `ptc-mode`（`{kind}`）、`compact-checkpoint`（`{kind, compactionId, sourceCommandId?}`）。
-   判据的优先级与失效史写在 §4.5——**别再读 `message.ts` 的基座 map，它 0.1.7-rc.2 起就不存在了**。
+   判据的优先级与失效史写在 §4.7——**别再读 `message.ts` 的基座 map，它 0.1.7-rc.2 起就不存在了**。
 2. **补建模**：5 个变体全部补齐（共 20 种）。`ContextFormed` 系的字段按**可选**处理——
    官方注释写明「缺省或未知值即默认形态」，一处省略不该吃掉整条消息。
 3. **让降级可见**（根治「靠运气发现」）：`SessionEvent::Unknown` 新增 `degraded: bool`，
@@ -336,6 +341,19 @@ stderr 无处可查。这类"空表"从表面完全看不出来，只有查询�
 自动化删除测试的脚本里，块注释中写了 `*/tests.rs` 与 `/* */` ——
 提前闭合了注释，Node 直接语法错误。**对策**：在注释里避免出现 `*/` 与 `/*` 序列。
 
+**⑧ 子表外键 + 「落库失败只打一行 stderr」= 又一次「表是空的」**（2026-09-29）
+
+写 `requests` 表写入方时，测试报「一次 prompt 应落一行请求事实：[]」——表是空的。
+表面看和「表根本没有写入方」（§2.6⑤ 那个老问题）一模一样，实际是**外键**：
+
+`requests.session_id` 引用 `sessions(id)`，而**第一次 prompt 时该会话还没落过任何快照**
+（快照要等事件回来才有内容）→ `INSERT` 撞 `FOREIGN KEY constraint failed`；
+engine 的落库错误策略是「打一行 stderr 就继续」，所以失败被吞掉，只有查询才暴露。
+对策：`Store::ensure_session`（幂等补壳行，`INSERT OR IGNORE`）。
+
+**为什么这次很快就定位**：因为**测试写得足够具体**（断言「表里应有 1 行」而不是「没报错」）——
+这与 §2.6 开篇那句「这类 bug 只能靠『对应该发生的事本身断言』抓出来」是同一件事。
+
 **⑦ 空集合上的「立刻就绪」会让总线空转烧一个核**（2026-09-29，重建测试时抓到的真 bug）
 
 `FuturesUnordered::next()` 在**空集合**上立刻返回 `None`。engine 的事件循环是
@@ -418,13 +436,26 @@ import。若官方把它们改成 `optionalDependencies` 或 peer，下载量能
 | 2026-09-29 | `EngineCmd::ResetSession` **不要求调用方给新 session id**（改由 engine 生成，经 `EngineEvent::SessionReset` 回报） | 我最初的设计让 UI 预测新 id——这是错的：id 唯一性规则（真实 dsh 按 id 落盘日志，重复会撞 `session already has a persisted log on disk`）属于 state 层，两侧各有一套生成逻辑必然漂移 |
 | 2026-09-29 | wire-log **路径生成权收归 engine**（原在 raw 自己拼） | 因为 engine 必须把**同一个路径**同时交给 `Recorder`（写 app 轨迹）与 spawn 配置（SDK 写 dsh 线级记录）；两边各自拼路径会散成两个文件，时间线无法对齐 |
 | 2026-09-29 | `Store::persist_snapshot` 签名 `&mut self` → **`&self`** | `rusqlite` 的 `unchecked_transaction` 只需 `&Connection`，所以落库本就该是只读借用。改掉后 engine 不必为每次落库做「先借 store 再借会话」的借用体操 |
-| 2026-09-29 | **补 `MessageSource::{SystemPrompt, RuntimeContext}`**（+ `MessageSourceForm::Snapshot`/`Other`） | 实测代价驱动，见 §2.1。**只补真实帧里出现过的**，其余缺口留给 §4.5 拍板 |
+| 2026-09-29 | **补 `MessageSource::{SystemPrompt, RuntimeContext}`**（+ `MessageSourceForm::Snapshot`/`Other`） | 实测代价驱动，见 §2.1。**只补真实帧里出现过的**，其余缺口留给 §4.7 拍板 |
 | 2026-09-29 | `MessageSourceForm` 加 `#[serde(other)] Other` | 官方 ContextForm 的注释写明「缺省或未知值即默认形态」——未知 form 不该让整条消息降级 |
 | 2026-09-29 | 协议侧「事件全集」对账**下沉一条到 `cargo test`**（对锁定快照） | 脚本对官方真源、测试对快照；只 clone dshr 的机器也能挡住枚举被改坏 |
 | 2026-09-29 | `Engine::next()` 在空注册表时特判（只等命令） | 见 §2.6⑦：不特判就是总线空转烧一个核的静默 bug |
-| 2026-09-29 | 补 `plan-mode` / `model-selection` / `user-approval` / `ptc-mode` / `compact-checkpoint` 五个 kind | 由 `scripts/scan-message-sources.mjs` 按「依赖闭包内 + 代码里真会写出去」筛出，形状逐条取证（见 §4.5） |
+| 2026-09-29 | 补 `plan-mode` / `model-selection` / `user-approval` / `ptc-mode` / `compact-checkpoint` 五个 kind | 由 `scripts/scan-message-sources.mjs` 按「依赖闭包内 + 代码里真会写出去」筛出，形状逐条取证（见 §4.7） |
 | 2026-09-29 | 给 `Unknown` 加 `degraded` 标记，engine 记 `event.degraded` | 把「已知类型解析失败」从「类型未知」里分出来——前者要修，后者是预期；这是「静默失败」那类 bug 的对策 |
 | 2026-09-29 | 消息来源 kind 的判据改为「真实帧 + 合并声明 + 迁移表」三条，**弃用** `message.ts` 基座 map | 那份 map 在 0.1.7-rc.2 已不存在（§2.1 的错读就是这么来的） |
+| 2026-09-29 | `request/header` + `request/context` 折进快照 `last_request`（此前都折成 `{}`） | 用户问「为什么等待时什么都看不到」的根因不是缺定时器：折完无变化 → 脏检测不发事件（§4.8）。**数据侧先行，UI 显示留 M5**（用户要求 UI 之前先做核心逻辑） |
+| 2026-09-29 | 落盘数据用 **CSV 导出**打通「看得见」（`export.rs` + `Store::export_rows`） | 监控页未做，但数据已经有了（§4.8）；导出函数将来直接接监控页，所以不是临时脚本 |
+| 2026-09-29 | 会话历史走「**按 sessionId 分组回放 wire-log**」而不是查库 | 库里按设计没有 messages 表（§8.2）；实测 wire-log 有 42 个会话而库里只有 3 行（§4.5） |
+| 2026-09-29 | `MessageSourceForm` 等 `ContextFormed` 字段按可选比对 | 官方注释写明「缺省或未知值即默认形态」，一处省略不该吃掉整条消息 |
+| 2026-09-29 | **新增 `messages` 表**：逐条对话落库（含注入与尝试），**原文不截断** | 用户要求「细致到每个会话内的每轮对话，除逐 chunk 之外都记」；截断下移到渲染层（工具 arguments 全文进库） |
+| 2026-09-29 | fold 不再丢弃**程序化注入**与**未提交尝试**：折成 `Injected`/`Attempt` 行 | 记录与显示分开——**显示策略归 UI**（`model.rs` 过滤），库与导出是全量的 |
+| 2026-09-29 | **复原**：`Store::load_snapshot` / `load_session_ids`，`sessions.meta_json` 存会话级聚合 | 用户要求「关掉再打开还能复原记录」；契约是**逐字段相等**（`restore_roundtrip`） |
+| 2026-09-29 | token 六桶列**可空**（NULL ≠ 0） | 官方 adapter 缺报的桶是 unknown；写成 0 会让复原从「未知」变「0」（往返测试当场抓到） |
+| 2026-09-29 | schema 引入 `PRAGMA user_version` + 加列迁移 | 用户的历史会话在库里，升级不能靠删库；`MIGRATIONS_V2` 先探测后 ALTER（幂等） |
+| 2026-09-29 | `requests` 表接入第二个写入方（engine 记每次 prompt 的耗时/成败/原因） | 「发送失败也要记」用户明确要求；`Store::ensure_session` 解决父行外键（§2.6⑧） |
+| 2026-09-29 | M6 只做「拉」这一半（`ReadSnapshot`/`SessionLoaded`/`ListSessions`），**推送保持不动** | 「事件只发轻通知」必须与消费侧同批改：只改执行者会让界面静止（而静默是本项目最贵的失败形态）。切换清单见 §4.9 |
+| 2026-09-29 | 拉取结果用**独立事件** `SessionLoaded` 而不是复用 `Snapshot` | 语义不同（我问你要 vs 变了顺手给你）；且 `runtime: Option<RuntimeId>` 要能表达「库里复原的历史会话不属于任何运行中 runtime」——硬塞一个 id 会让 UI 建出假节点 |
+| 2026-09-29 | 拉取**只读**（不脏检测、不落库）、历史态**不缓存** | 拉不该有副作用；读几百行是毫秒级，缓存反而引入失效问题（会话可能又被跑起来） |
 
 ---
 
@@ -488,10 +519,72 @@ import。若官方把它们改成 `optionalDependencies` 或 peer，下载量能
   （分别等 s1 请求层折叠、多 runtime 管理、stderr 通道）。
 - **💡 README 双语 + 发布准备**：发布等 SDK 全做完 + 测试完（用户明确暂缓）。
 
-### 4.5 消息来源 kind 的覆盖缺口（**需要用户拍板**）
+### 4.5 会话历史的记录与「跨会话」（用户 2026-09-29 提出，**待讨论**）
 
-**现状**：`MessageSource` 建模 15 种 kind，但官方生态里的生产者远多于此。
-**未建模的 kind 会让含它的整条消息降级 `Unknown`**（机制与代价见下）。
+**用户的诉求**：会话历史要能记下来、特别是**跨会话**可查（现在 UI 只看得见当前会话）。
+
+**现状盘点**（三处存放，职责不同，别混）：
+
+| 源 | 内容 | 覆盖 | 读取方式 |
+|---|---|---|---|
+| `dshr/data/dsh-home/sessions/<ws>/<id>/session.jsonl.zstd` | runtime 自己的**会话日志**（多独立 zstd frame，首行是 SessionHeader） | 每个会话一份，官方格式 | 需解 zstd + 按官方 schema 读 |
+| `dshr/data/wire-logs/*.jsonl` | 宿主侧**全程记录**（cat=dsh 线级 + cat=app 轨迹） | **全集**：本次实测回放出 **42 个会话**，而库里只有 3 行 session | `Folder::push_wire_line` 回放（已落地，见 §4.8 的导出） |
+| `dshr/data/dshr.db` | 加工**事实表**（sessions/turns/tool_calls/file_ops） | 只有**当前**跑过的会话 | SQL 聚合 |
+
+**关键观察（本次实测）**：库里 3 个会话 vs wire-log 里 42 个——**wire-log 才是历史的全集**，
+库只装「引擎跑过并落盘过的」。原因是设计如此（§8.2 不建 events 全量表），但代价是
+「重启后列历史会话」目前没有索引可查（要扫全部 wire-log 才能知道有哪些会话）。
+
+**✅ 本轮（2026-09-29）已落地的部分**：库里现在有**逐条对话**（`messages` 表：turn/step/source/
+text/reasoning/error/token 六桶/流摘要/工具全文），并且 `Store::load_snapshot` 能**关掉再打开复原**
+（契约是逐字段相等）。也就是说「历史记录」这件事从「只能回放 wire-log」升级成「库里就有」。
+**仍未做**的是下面的**索引**（A/B）：库里现在只装「引擎跑过并落盘过的会话」，
+「应用启动时列出所有历史会话」还需要索引或扫描。
+
+**三个可选方向（代价递增）**：
+
+| 方向 | 做法 | 代价 / 风险 |
+|---|---|---|
+| A 每次会话结束写一行 `sessions`（含起始时间/wire-log 文件名） | 最小改动，让「历史会话目录」有索引 | 库会随会话数线性增长（可接受）；要处理「同 id 重复落盘」（幂等已有） |
+| B 启动时增量导入：扫 wire-log 把见过的 session 补进库（带书签，不重复扫） | 索引与全集一致，且能回答「哪个会话在哪个日志文件里」 | 启动成本；要定书签格式与损坏日志的容错 |
+| C 直接读官方 session.jsonl.zstd | 与官方语义完全一致（含 compaction 后的 surface 重写） | 要解 zstd 多 frame + 跟官方 schema 漂移；与 wire-log 回放可能给出**不同**结果（surface 重写 vs 原始流） |
+
+**我的倾向**：先 A（便宜、立刻让历史可列），B 留到监控页要「历史浏览」时做；
+C 作为「与官方对齐」的独立议题——它能拿到 wire 上看不到的东西（surface 重写后的真实历史），
+但要接受官方格式漂移的维护成本。**注意**：C 与 A/B 不是替代关系，是两个视角。
+
+**已落地的第一步**：`dshr-state/src/export.rs` 的 `replay_sessions` 已经能做「跨会话重建历史」
+（按 sessionId 分组回放，见 §4.8）——上面 A/B/C 都是在它之上补「索引」与「官方视角」。
+
+### 4.6 多 runtime ≈ 多智能体？（用户 2026-09-29 提出，**只是记录**）
+
+**用户的理解**：官方一个 runtime 对应我们这里的一个会话；想知道 dshr 能不能做多个 runtime，
+类似多智能体。
+
+**事实澄清（很重要，我核对过协议与官方包）**：
+
+- **一个 runtime ≠ 一个会话**。官方 `HarnessClient`（= 一个 node 子进程 = 一个 dsh 实例）内可以
+  并存多个会话：`session/prompt` 的官方注释写明「unknown id lazily creates the agent+session pair」。
+- 官方的「多智能体」是 **runtime 内的父子会话**（`subagent/*` 事件族 + `parent` 血缘，
+  `dsh-agent` 的 subagent 驱动），不是多进程；dshr 的库里 `sessions.parent` 列已为此留位。
+- dshr 的 **state 层已经支持多 runtime**（注册表 + 按 sessionId 路由 + 每会话态 + 路由隔离测试）；
+  缺的是 **UI 侧**（`dshr-ui/src/app.rs` 的 `RT_ID = "rt-1"` 固定单视图）——这正是 M5。
+
+**两条路的代价对比（记录备查）**：
+
+| 路线 | 形态 | 代价 | 收益 |
+|---|---|---|---|
+| 多 runtime | N 个 node 进程，各自独立 dsh 与 DSH_HOME 视角 | 每 runtime 一个 node 进程（实测常驻 ≈100–200 MB 量级）；安装/启动 ×N | 强隔离（崩一个不影响其它）；不同 provider/model 并存 |
+| 单 runtime 多会话 + subagent | 官方原生血缘树 | 共享一个进程的 agent 注册表；子代理的模型/权限受父会话策略约束 | 便宜；与官方生态一致（子代理工具、任务面板都是官方已有的） |
+
+**结论（暂定）**：先把 **M5**（多 runtime/多会话的 UI）打通——它是两条路的共同底座；
+「多智能体」的产品形态（要不要让两个 runtime 互相通信？共享工作区？谁来做调度？）
+是**产品决策**，等 M5 落地、真实用起来之后再单独议。此处只留档，不排期。
+
+### 4.7 消息来源 kind 的覆盖缺口（✅ 已落地，留档）
+
+**现状**：`MessageSource` 建模 **20 种** kind（2026-09-29 起），且**已无「可达但未建模」的缺口**。
+**未建模的 kind 会让含它的整条消息降级 `Unknown`**——机制、代价与本次取证过程见下。
 
 **先把「权威判据」这件事定了**（2026-09-29 现场取证）：
 
@@ -552,6 +645,63 @@ import。若官方把它们改成 `optionalDependencies` 或 peer，下载量能
 条目按「官方声明 = 全可选」来查——**当前没有差异**（那些条目在合并声明里没出现，故未逐字段核；
 真要落到证据上，得去各包 `declare module` 逐个看）。⚠️ 这一条是**已知的检查盲区**，
 记在这里而不是假装已经验过。
+
+### 4.8 落盘数据的导出（CSV）与「等待可见」（2026-09-29 落地）
+
+**用户诉求**：库里落盘的数据现在没地方看（监控页未做），先能用一种方式**看数据**；
+将来这套导出直接变成监控页的历史导出，并且要能导出**会话历史**。
+
+**✅ 已落地**（`dshr-state/src/export.rs` + `tests/export_csv.rs`）：
+
+| 能力 | 数据源 | 产物 |
+|---|---|---|
+| 库表导出 | `dshr.db` 六张事实表（runtimes/sessions/turns/tool_calls/file_ops/runtime_logs） | 六个 CSV（显式列序 + 稳定排序 → 两次导出逐字节可比） |
+| 会话历史 | 内存/回放快照 | `<session>.messages.csv` + `<session>.turns.csv` |
+| **跨会话历史** | `data/wire-logs/*.jsonl` | 按 `sessionId` 分组回放，**每个会话一条独立时间线** |
+
+**关键实测（本次真跑）**：从 wire-log 回放出 **42 个会话**，而库里只有 **3 行 session**——
+说明**历史的全集在 wire-log 里**，库只装「引擎跑过并落盘过的」。这条事实直接喂给了 §4.5
+的 A/B/C 三个方向。真跑入口：`$env:DSHR_EXPORT='1'; cargo test -p dshr-state --test export_csv -- --nocapture`
+（导出到 `data/exports/<epoch>-<pid>/`，打印每份文件的行数与几条样本）。
+
+**为什么历史必须靠回放而不是查库**：库里按设计**没有 messages 表**（§8.2 明确不建 events 全量表，
+wire-log 已是 lossless 源）；`turns`/`tool_calls` 只是聚合事实。所以「这个会话到底聊了什么」
+只有回放能得到——而回放用的 `Folder` 与在线是同一套折叠语义（`fold_projection.rs` 有同源同巡断言），
+导出与 UI 不会分叉。
+
+**顺带落地的「等待可见」（数据侧）**：`request/header` 与 `request/context` 此前都折成 `{}`，
+**快照无变化 → 脏检测不发事件 → UI 一片静止**（用户无法区分「在等模型」与「卡死了」）。
+现在折进 `SessionSnapshot.last_request`（起点时刻/seq/原因/工具数 + provider/model/上下文窗口），
+等待这段没有事件的时间**在数据层可观测**。UI 侧的显示（状态栏「正在等待 model · Ns」）
+留给 M5 那一轮——本轮只做核心逻辑（用户要求 UI 之前先做核心逻辑）。
+
+### 4.9 M5 待办清单（UI 轮；数据面都已就绪，逐条可勾）
+
+**A. 多 runtime / 多会话（用户明确要的能力）**
+1. `dshr-ui/src/app.rs` 的 `const RT_ID = "rt-1"` 固定视图 → 按 `EngineEvent` 里的 runtime 标
+   维护 `RuntimeView` 列表（侧边栏已是树形，`data.runtimes` 已能容纳多条）。
+2. 「当前会话」概念：`data.chat` 目前是**单会话**状态，要改成 `selected: (RuntimeId, SessionId)`
+   + 每会话一份 `ChatState`（或按需拉取，见 B）。
+3. 侧边栏交互：切换会话、每条 runtime 的 ⋯ 菜单（新建会话 / 停止）。
+
+**B. M6 的另一半：事件只发轻通知 + UI 按需拉**
+4. engine：新增 `EngineEvent::SnapshotChanged { id, session }`（轻），把变更路径的整份快照
+   换成它；`start_runtime`/`reset_session`/`ReadSnapshot` 仍发整份（那是「首屏」不是「变更」）。
+5. UI：收到 `SnapshotChanged` → 发 `EngineCmd::ReadSnapshot { session }` → 应用 `SessionLoaded`。
+   **必须与 4 同批**（只做一侧 = 界面静止）。
+6. 切换完成后可以省掉 bridge 里对整份快照的搬运，多会话下的 clone 开销随之消失。
+
+**C. 历史会话（复原）的界面**
+7. `EngineCmd::ListSessions` → `EngineEvent::Sessions`：侧边栏挂「历史会话」一层
+   （当前 `Sessions` 事件只写一行状态提示，见 `app.rs` 的臂注释）。
+8. 点历史会话 → `ReadSnapshot` → `SessionLoaded { runtime: None }` → 以**只读**视图打开
+   （此时 composer 应禁用或提示「这是历史会话」——否则用户会往一个不存在的 runtime 发消息）。
+
+**D. 等待可见（§4.8 的数据侧已完成）**
+9. 状态栏显示「正在等待 <model> · Ns」：`last_request.started_at` + 与最后一条 assistant 行的
+   seq 比较即可判定「还在等」；这是唯一需要 UI 起定时器的地方（其余都事件驱动）。
+10. `Injected` / `Attempt` 行已有数据但被 `model.rs` 过滤——若要做「显示注入/尝试」开关，
+    把过滤条件参数化即可（渲染臂已写好，见 `task/chat.rs`）。
 
 ---
 

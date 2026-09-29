@@ -28,8 +28,11 @@ use dsh_sdk_protocol::notifications;
 use dsh_sdk_protocol::notifications::SessionStatus;
 use dsh_sdk_protocol::rpc;
 use dsh_sdk_protocol::session_event::SessionEvent;
+use dsh_sdk_protocol::session_event::retry;
 
-use crate::snapshot::{MsgItem, SessionSnapshot, SessionStats, TurnStat, UsageAgg};
+use crate::snapshot::{
+    FileDiff, MsgItem, RequestView, SessionSnapshot, SessionStats, TurnStat, UsageAgg,
+};
 
 /// 折叠状态机：喂事件 → 内部态推进 → `snapshot()` 出不可变快照。
 ///
@@ -55,6 +58,21 @@ pub struct Folder {
     messages: u64,
     tool_calls: u64,
     errors: u64,
+    /// 最近一次模型请求 / 路由元数据（`request/header` + `request/context` 折叠）。
+    /// 为什么留着它：它让「正在等模型」这段**没有事件的时间**在快照里可见（见 `RequestView`）。
+    last_request: RequestView,
+    /// 当前步号（`step/start` 写入、`turn/end` 清空）：给不带 turn/step 的消息行兜底标注。
+    cur_step: Option<u64>,
+    /// 见过的最大事件 seq（已收到的事件里最大者）。
+    ///
+    /// 为什么需要：**本地合成行**（Fake 回显、发送失败的记录）没有 wire seq，而 `messages`
+    /// 表以 `(session_id, seq)` 为主键——本地行必须拿一个不与 wire seq 撞车的号。
+    /// 取 `max_seq + 1` 既保证唯一，又保证它在消息流里排在最后（时间序正确）。
+    max_seq: u64,
+    /// plan 模式开关（`plan/mode` 覆盖式：最后写入者胜，与官方注释一致）。
+    plan_mode: bool,
+    /// 沙箱模式（`sandbox/mode` 覆盖式；值为 wire 文本如 `workspace-write`）。
+    sandbox_mode: Option<String>,
 }
 
 /// 进行中轮的折叠态。
@@ -81,12 +99,30 @@ impl Folder {
             messages: 0,
             tool_calls: 0,
             errors: 0,
+            last_request: RequestView::default(),
+            cur_step: None,
+            max_seq: 0,
+            plan_mode: false,
+            sandbox_mode: None,
         }
+    }
+
+    /// 追加一条**本地**记录（宿主侧事实，wire 上没有对应事件）：如「发送失败：<原因>」。
+    ///
+    /// 为什么需要：用户明确要求「哪怕对话发送失败了，失败原因也要记」——这类事实请求根本没
+    /// 送到 runtime，不会有任何 wire 事件替我们记；只能由 engine 主动写入。
+    /// seq 自取 `max_seq + 1`（见字段注释：避免与 wire seq 撞主键，且顺序仍正确）。
+    pub fn push_local_notice(&mut self, time: u64, text: String, error: Option<String>) {
+        self.max_seq += 1;
+        let seq = self.max_seq;
+        self.push_notice_with(seq, time, text, error);
     }
 
     /// 折叠一条已解析的会话事件（事件不含 sessionId，如需快照带 session_id 请用
     /// `push_wire_line` / `push_notification`，或事后从通知侧补）。
     pub fn push_event(&mut self, ev: &SessionEvent) {
+        // 先记账"见过的最大 seq"：本地合成行靠它取一个不撞主键的序号（见 `max_seq` 字段）。
+        self.max_seq = self.max_seq.max(ev.seq());
         use SessionEvent::*;
         match ev {
             // —— 折叠：轮 / 步 ——
@@ -106,23 +142,49 @@ impl Folder {
                     });
                 }
             }
-            TurnEnd { time, data, .. } => self.on_turn_end(*time, data),
-            // step 数按 step/start 计（截断日志下比 end 侧稳）。
-            StepStart { .. } => self.steps += 1,
-            // step/end 与 step/start 对称，无额外折叠内容。
+            TurnEnd { time, data, .. } => {
+                self.on_turn_end(*time, data);
+                // 轮结束即离开该步：后续行不该再被标注成"还在这一步里"。
+                self.cur_step = None;
+            }
+            // step 数按 step/start 计（截断日志下比 end 侧稳）；同时记住当前步号，
+            // 给不带 step 的消息行兜底标注（落库要有轮/步归属）。
+            StepStart { data, .. } => {
+                self.steps += 1;
+                self.cur_step = Some(data.step);
+            }
+            // 步结束不清 cur_step：紧随其后的收尾行（Notice 等）仍属于这一步。
             StepEnd { .. } => {}
             // —— 折叠：消息 ——
             UserMessage { seq, time, data } => self.on_user_message(*seq, *time, data),
-            // system/message 是派生 surface 的系统提示，s1 暂不折入消息流。
-            SystemMessage { .. } => {}
+            // system/message（系统提示）折成 Injected 行：它是「模型当时看到了什么」的事实，
+            // 此前完全丢弃（用户要求「能记录多少就记多少」）；显示由 UI 决定。
+            SystemMessage { seq, time, data } => {
+                self.on_injected_message(
+                    *seq,
+                    *time,
+                    &data.message,
+                    Some(data.turn),
+                    Some(data.step),
+                );
+            }
             AssistantMessage { seq, time, data } => self.on_assistant_message(*seq, *time, data),
-            // assistant/attempt 没有提交 surface 消息，不入库不聚合。
-            AssistantAttempt { .. } => {}
+            // assistant/attempt：未提交 surface 消息的模型尝试（失败/中断时唯一的证据）。
+            AssistantAttempt { seq, time, data } => {
+                self.on_assistant_attempt(*seq, *time, data);
+            }
             // —— 折叠：工具（call ↔ result 按 call_id 配对）——
             ToolCall { seq, time, data } => self.on_tool_call(*seq, *time, data),
             ToolResult { time, data, .. } => self.on_tool_result(*time, data),
             // —— 折叠：会话属性 ——
             SessionTitle { data, .. } => self.title = Some(data.title.clone()),
+            // 模式开关是**覆盖式**（官方注释：回放取最后一个事件，无增量语义）→ 记住当前值。
+            PlanMode { data, .. } => self.plan_mode = data.active,
+            SandboxMode { data, .. } => {
+                self.sandbox_mode = serde_json::to_value(&data.mode)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string));
+            }
             // —— 折叠：Notice 行（compaction 是"上下文替换"类系统动作，UI 尚未消费，
             //     折一行小字占位；真正的 surface 替换语义留给 read 层/UI）——
             CompactionStart { seq, time, data } => {
@@ -165,8 +227,22 @@ impl Folder {
             FeedbackRecord { .. } => {} // log-only（官方：永不进模型上下文/历史）。
             FeedbackMessagePut { .. } | FeedbackMessageDelete { .. } => {} // 消息反馈 log-only。
             GoalChange { .. } => {} // 目标快照+墓碑；s4 目标视图（UI 未消费，别过度建模）。
-            RequestHeader { .. } => {} // 下次请求头快照 → 请求层统计（§11.3）；s2 落库用。
-            RequestContext { .. } => {} // 模型路由元数据，同上。
+            // 模型请求的**起点**：每次模型请求官方都发这个事件（`Agent.buildRequest()`）。
+            // 折进快照是「等待可见」的数据基础——它让"这段没有事件的时间"变得可观测
+            //（此前是 `{}`：折完快照无变化 → 脏检测不发事件 → UI 一片静止，见 snapshot::RequestView）。
+            RequestHeader { seq, time, data } => {
+                self.last_request.started_at = Some(*time);
+                self.last_request.seq = Some(*seq);
+                self.last_request.reason = Some(render::request_reason_text(&data.reason));
+                self.last_request.tools = data.header.tools.as_ref().map(Vec::len);
+            }
+            // 模型路由元数据（provider / model / 上下文窗口）：不随每次请求重发，
+            // 所以只更新这几项、不动 started_at/seq（否则会伪造出"正在等待"）。
+            RequestContext { data, .. } => {
+                self.last_request.provider = Some(data.provider.clone());
+                self.last_request.model = Some(data.model.clone());
+                self.last_request.context_window = data.context_window;
+            }
             SessionEndSeed { .. } => {} // 种子边界标记；seq 顺序天然保真，折叠不关心。
             DeliverablesPresented { seq, time, data } => {
                 // 先折成一行 Notice；后续再做交付文件卡片/侧栏。
@@ -190,7 +266,17 @@ impl Folder {
             // 增量工具声明变更（官方 0.1.7-rc.2）：surface 事件（tool-addition /
             // tool-removal 块），但 s1 不重建请求历史，故无折叠值；s2 落库时按
             // 事实表评估（请求侧工具历史）。
-            DeveloperMessage { .. } => {}
+            DeveloperMessage { seq, time, data } => {
+                // 工具增删（tool-addition / tool-removal 块）：折成 Injected 行保真
+                //（此前丢弃 → 「模型当时有哪些工具」在库里查不到）。
+                self.on_injected_message(
+                    *seq,
+                    *time,
+                    &data.message,
+                    Some(data.turn),
+                    Some(data.step),
+                );
+            }
             // 图片卸载决策（官方 0.1.7-rc.2，标 @messageProjection）：只影响后续
             // 模型请求的图片投影，不改消息身份/内容；s1 折叠不消费。
             ImageOffload { .. } => {}
@@ -202,12 +288,43 @@ impl Folder {
             ApprovalPolicy { .. } | PermissionPreset { .. } => {} // 策略快照；无折叠值。
             CommandRun { .. } | CommandDone { .. } => {} // 命令轨迹 → 请求层（§11.3）；s2 评估。
             HookInvoked { .. } | HookResult { .. } => {} // hook 调用轨迹；无折叠值。
-            LlmRetry { .. } | LlmRetryStarted { .. } => {} // 重试链 → 请求层（重试 = 额外 token）；s2 评估。
-            PlanMode { .. } | SandboxMode { .. } => {}     // 模式开关快照；s4 会话属性。
-            ScheduleChange { .. } => {}                    // 调度变更；UI 未消费。
-            SessionTitleLlmRequest { .. } => {}            // 标题生成内部请求快照；无折叠值。
-            SubagentDescriptor { .. } => {} // 静态组成声明（每会话至多一次）；s4 子代理视图。
-            SubagentCatalog { .. } => {}    // 父会话子代理目录；s4 子代理树。
+            // 重试链：折一行 Notice 并**带上失败原因**（重试 = 额外 token，而「为什么失败」
+            // 用户明确要求留下）。`llm/retry-started` 只有定位字段，折一行"开始第 N 次重试"。
+            LlmRetry { seq, time, data } => {
+                let (retry, delay_ms, max, failure) = match data {
+                    retry::LlmRetryData::Normal {
+                        retry,
+                        delay_ms,
+                        max_retries,
+                        failure,
+                        ..
+                    } => (*retry, *delay_ms, Some(*max_retries), failure),
+                    retry::LlmRetryData::Always {
+                        retry,
+                        delay_ms,
+                        failure,
+                        ..
+                    } => (*retry, *delay_ms, None, failure),
+                };
+                let cap = max.map_or("∞".to_string(), |m| m.to_string());
+                self.push_notice_with(
+                    *seq,
+                    *time,
+                    format!(
+                        "第 {} 次重试（上限 {cap}，等待 {delay_ms}ms）：{}",
+                        retry + 1,
+                        failure.message
+                    ),
+                    Some(format!("{}: {}", failure.code, failure.message)),
+                );
+            }
+            LlmRetryStarted { seq, time, data } => {
+                self.push_notice(*seq, *time, format!("第 {} 次重试开始", data.retry + 1));
+            }
+            ScheduleChange { .. } => {}         // 调度变更；UI 未消费。
+            SessionTitleLlmRequest { .. } => {} // 标题生成内部请求快照；无折叠值。
+            SubagentDescriptor { .. } => {}     // 静态组成声明（每会话至多一次）；s4 子代理视图。
+            SubagentCatalog { .. } => {}        // 父会话子代理目录；s4 子代理树。
             TeamMember { .. }
             | TeamMessageQueued { .. }
             | TeamMessageDelivered { .. }
@@ -312,6 +429,9 @@ impl Folder {
             messages: self.msgs.clone(),
             turns,
             stats,
+            last_request: self.last_request.clone(),
+            plan_mode: self.plan_mode,
+            sandbox_mode: self.sandbox_mode.clone(),
         }
     }
 
@@ -322,6 +442,16 @@ impl Folder {
 
 pub mod event;
 pub mod render;
+
+/// 自 `meta` **JSON 文本**重新折叠逐文件行数（库复原用）。
+///
+/// 为什么需要：库里 `messages.tool_meta` 存的是 meta 原文（lossless），而 `diffs` 只是它的投影；
+/// 复原时用同一个折叠函数再算一遍，保证「在线看到的」与「从库读回的」逐字段一致
+/// （不另存一份 diffs 是为了避免两处口径漂移）。
+pub fn render_diffs_from_meta(meta_json: Option<&str>) -> Vec<FileDiff> {
+    let value = meta_json.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    render::fold_diffs(value.as_ref())
+}
 
 // —— 纯辅助（被 event.rs / render.rs 跨模块使用，故 pub(crate)）——
 

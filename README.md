@@ -67,10 +67,13 @@ cargo run -p dshr-ui
 ### 验证状态（测试重建中：3/5）
 
 ```bash
-cargo test --workspace     # 当前 31 条契约测试（全部注入式/离线，不烧 token）
+cargo test --workspace     # 当前 45 条契约测试（全部注入式/离线，不烧 token）
 cargo build --workspace --all-targets
 cargo fmt --all -- --check
 node ../scripts/scan-message-sources.mjs   # 消息来源形状对账（换 runtime 版本后跑一次）
+
+# 导出落盘数据 + 会话历史（CSV）到 data/exports/：PowerShell 用 $env:，bash 用 DSHR_EXPORT=1 前缀
+$env:DSHR_EXPORT='1'; cargo test -p dshr-state --test export_csv -- --nocapture
 ```
 
 测试于 2026-09-29 一次性清空后，正按「**各 crate 一个 `tests/` 目录**」重建（不再散落在 `src/` 里）。
@@ -78,9 +81,10 @@ node ../scripts/scan-message-sources.mjs   # 消息来源形状对账（换 runt
 
 | crate | 测试文件 | 覆盖 |
 |---|---|---|
-| `dshr-state` | `tests/engine_flow.rs`（7） | engine 主链路、多 runtime 路由隔离、stderr/退村落盘、空注册表不空转、降级写 app 轨迹 |
-| `dshr-state` | `tests/fold_projection.rs`（7） | fold 投影语义 + 在线/离线同源同巡 |
-| `dshr-state` | `tests/store_persistence.rs`（4） | 落库幂等、替换语义、多会话隔离 |
+| `dshr-state` | `tests/engine_flow.rs`（8） | engine 主链路、多 runtime 路由隔离、stderr/退村落盘、空注册表不空转、降级写 app 轨迹、请求事实与失败可见 |
+| `dshr-state` | `tests/fold_projection.rs`（10） | fold 投影语义 + 在线/离线同源同巡 + 模型请求可见 + 行级 turn/step/source/error（含注入与尝试成行） |
+| `dshr-state` | `tests/store_persistence.rs`（6） | 落库幂等、替换语义、多会话隔离、**复原往返（逐字段相等）** |
+| `dshr-state` | `tests/export_csv.rs`（5） | CSV 转义、八张表导出、跨会话历史回放、全量导出 + 复原抽查 |
 | `dsh-sdk-protocol` | `tests/event_catalog.rs`（5） | 59 事件全集对账（对锁定快照）、降级识别、merge-extensible 兜底 |
 | `dsh-sdk-protocol` | `tests/frame_shape.rs`（6） | **真实录制帧**形状对账、20 种消息来源建模、内容块 roundtrip |
 
@@ -118,6 +122,7 @@ node ../scripts/scan-message-sources.mjs   # 消息来源形状对账（换 runt
 | `data/dsh-home/` | 每个 runtime 子进程独立的 DSH_HOME（不碰用户 `~/.dsh`）：`profiles/sdk` 是 sdk profile 的插件安装、`sessions/<工作区>/<会话id>/session.jsonl.zstd` 是会话持久化日志（zstd 压缩，多独立 frame）、`storages/` 是官方存储缓存、`.anonymous-user-id` 匿名用户 id |
 | `data/wire-logs/` | **WireLog 全程记录**（JSONL，每行一个事件）：`cat:"dsh"` = 与 runtime 的每条 wire 消息（请求/响应/通知，含 dir/kind/id/method/eventType/raw）；`cat:"app"` = 应用侧事件（config.loaded / runtime.ready / spawn.start 等）。状态冻结期间 UI 发的一切消息与 dsh 返回都在这里可查 |
 | `data/.pnpm-store/` | pnpm 内容寻址 store（v11，index.db + files/）——runtime 安装时 pnpm install 的共享仓库，删除后下次安装会重新拉取 |
+| `data/exports/` | CSV 导出产物（`DSHR_EXPORT=1` 真跑；库表 + 跨会话语历史，可整目录删除） |
 | `data/secrets.json` | API key 本地密钥（Unix 0600；不再写入 config.json） |
 
 > 会话日志命名教训：会话 id 必须唯一（R7），复用固定 id（如 `s1`）会撞上官方磁盘持久化日志
@@ -145,6 +150,13 @@ node ../scripts/scan-message-sources.mjs   # 消息来源形状对账（换 runt
 - **降级不再静默**：`Unknown.degraded` 区分「已知类型解析失败」（协议漂移，engine 写
   `event.degraded` 轨迹）与「类型本身就未知」（预期内）；`scripts/scan-message-sources.mjs`
   负责**发现**新 kind 与字段漂移（测试只能守已知样本）。
+- **按需拉取 + 历史复原的数据面就绪**（M6 的一半）：`EngineCmd::ReadSnapshot` 双路查找
+  （运行中 → 库里复原）、`ListSessions` 给出会话目录；UI 侧切换（事件只发轻通知 + 按需拉）
+  与多 runtime 一起做（M5），理由见 `DESIGN.md` §7.2。
+- **落库粒度 = 除逐 chunk 之外全落**（2026-09-29）：`messages` 表逐条记对话（含程序化注入与
+  未提交的尝试）、turn/step/source 归属、工具全文与失败原因；`requests` 表记每次 prompt 的
+  耗时/成败/**失败原因**。**关掉再打开可复原**：`Store::load_snapshot` 从库读回完整快照
+  （契约测试断言逐字段相等）。原文不截断（截断只发生在渲染层）。
 - state 层 **完成**：engine / fold / SQLite / WireLog 全链路验证通过；runtime 会校验安装版本，
   版本不匹配时自动 `pnpm install --force` 升级。
 - UI **主路径完成**：任务页真实 bridge、会话/工具卡片、设置页、composer + Enter 发送、窗口控制；

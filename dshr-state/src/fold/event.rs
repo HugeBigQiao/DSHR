@@ -13,7 +13,7 @@
 //! 父模块的 `push_event` 调用（Rust 的「私有」只对自身及后代模块可见，父模块看不见）。
 use dsh_sdk_protocol::content_block::ContentBlock;
 use dsh_sdk_protocol::session_event::message::{
-    AssistantMessageData, Message, MessageRole, MessageSource,
+    AssistantAttemptData, AssistantMessageData, Message, MessageRole, MessageSource,
 };
 use dsh_sdk_protocol::session_event::tool::{ToolCallData, ToolResultData};
 use dsh_sdk_protocol::session_event::turn::{TurnEndData, TurnEndReason};
@@ -54,26 +54,67 @@ impl Folder {
         });
     }
 
-    /// 只认 role=user 且 source.kind=user 的人类消息为 User 行；其余来源（goal 续跑/
-    /// webhook/技能/指令/上下文注入……官方把它们都写成 role=user 的程序化输入）s1 不占
-    /// 消息流——折叠语义留 s3（按 source.kind 分类渲染），wire 原样保真在 JSONL。
+    /// 折一条 `user/message`：**所有来源都折成行**。
+    ///
+    /// 人类输入（`source.kind = user`）折成 `User` 行；程序化注入（goal 续跑 / webhook /
+    /// runtime-context / plan-mode / 技能指令……官方把它们**都写成 role=user 的程序化输入**）
+    /// 折成 `Injected` 行并带上来源文本。
+    ///
+    /// 为什么不再直接丢（2026-09-29 用户要求「能记录多少就记多少」）：它们是「模型当时看到
+    /// 了什么」的事实，此前 `return` 掉之后库里与导出里都没有，只能回 wire log 里翻。
+    /// **显示策略归 UI**（默认不渲染 Injected 行），记录与显示从此分开。
     pub(super) fn on_user_message(&mut self, seq: u64, time: u64, msg: &Message) {
         if msg.role != MessageRole::User {
             return;
         }
-        if !matches!(msg.source, MessageSource::User { .. }) {
-            return;
+        if matches!(msg.source, MessageSource::User { .. }) {
+            self.push_row(MsgItem {
+                kind: MsgKind::User,
+                // 只拼 text 块；图片等附件消息文本为空（附件渲染 s3），行仍保留以保事件序。
+                text: text_of(&msg.content),
+                reasoning: None,
+                usage: None,
+                stream: None,
+                tool: None,
+                time,
+                seq,
+                turn: self.open_turn.as_ref().map(|t| t.turn),
+                step: self.cur_step,
+                source: "user".to_string(),
+                error: None,
+            });
+        } else {
+            self.on_injected_message(seq, time, msg, None, None);
         }
+    }
+
+    /// 折一条**程序化注入**的消息（`system/message`、`developer/message`、以及非人类来源的
+    /// `user/message`）：kind = `Injected`，来源文本进 `source` 列。
+    ///
+    /// `turn`/`step` 优先用事件自带的值（system/developer 带），没有则沿用当前进行中的轮/步。
+    pub(super) fn on_injected_message(
+        &mut self,
+        seq: u64,
+        time: u64,
+        msg: &Message,
+        turn: Option<u64>,
+        step: Option<u64>,
+    ) {
+        let text = text_of(&msg.content);
+        let reasoning = reasoning_of(&msg.content);
         self.push_row(MsgItem {
-            kind: MsgKind::User,
-            // 只拼 text 块；图片等附件消息文本为空（附件渲染 s3），行仍保留以保事件序。
-            text: text_of(&msg.content),
-            reasoning: None,
+            kind: MsgKind::Injected,
+            text,
+            reasoning,
             usage: None,
             stream: None,
             tool: None,
             time,
             seq,
+            turn: turn.or_else(|| self.open_turn.as_ref().map(|t| t.turn)),
+            step: step.or(self.cur_step),
+            source: source_kind_of(&msg.source),
+            error: None,
         });
     }
 
@@ -114,8 +155,39 @@ impl Folder {
             tool: None,
             time,
             seq,
+            turn: Some(data.turn),
+            step: Some(data.step),
+            // 模型产出的消息：source.kind 必为 model（官方 AssistantMessage 的 source 就是 ModelMessageSource）。
+            source: source_kind_of(&data.message.source),
+            error: None,
         };
         self.push_row(item);
+    }
+
+    /// 折一条 `assistant/attempt`：一次**没有提交 surface 消息**的模型尝试。
+    ///
+    /// 为什么值得一行：中断/失败/重试场景下常常只剩这个可查——它带 turn/step 与流摘要，
+    /// 是「模型确实跑过、token 确实花过」的证据（官方注释：attempt 不提交 surface 消息）。
+    pub(super) fn on_assistant_attempt(
+        &mut self,
+        seq: u64,
+        time: u64,
+        data: &AssistantAttemptData,
+    ) {
+        self.push_row(MsgItem {
+            kind: MsgKind::Attempt,
+            text: String::new(),
+            reasoning: None,
+            usage: None,
+            stream: data.stream.as_deref().map(stream_summary),
+            tool: None,
+            time,
+            seq,
+            turn: Some(data.turn),
+            step: Some(data.step),
+            source: "model".to_string(),
+            error: None,
+        });
     }
 
     pub(super) fn on_tool_call(&mut self, seq: u64, time: u64, data: &ToolCallData) {
@@ -130,15 +202,22 @@ impl Folder {
             tool: Some(ToolItem {
                 call_id: data.call_id.clone(),
                 name: data.name.clone(),
-                arguments: truncate_chars(&data.arguments, 300),
+                // 不截断：库/导出要保真（用户 2026-09-29 要求），截断交给渲染层。
+                arguments: data.arguments.clone(),
                 // 挂起态：result 未到（时长/错误/结果在 tool/result 时补全）。
                 duration_ms: 0,
                 is_error: false,
+                error: None,
                 result: None,
                 diffs: Vec::new(),
+                meta: None,
             }),
             time,
             seq,
+            turn: Some(data.turn),
+            step: Some(data.step),
+            source: "model".to_string(),
+            error: None,
         });
         self.tool_index.insert(data.call_id.clone(), idx);
     }
@@ -157,35 +236,52 @@ impl Folder {
             return;
         };
         let is_error = data.error.is_some() || block.is_error == Some(true);
-        // 结果摘要 = tool-result 块内首文本块（截断 300）；兼容旧形状：退而取消息顶层文本块。
+        // 结果正文 = tool-result 块内首文本块（**不截断**）；兼容旧形状：退而取消息顶层文本块。
         let result_text = block
             .content
             .iter()
             .find_map(|b| match b {
-                ContentBlock::Text(t) => Some(truncate_chars(&t.text, 300)),
+                ContentBlock::Text(t) => Some(t.text.clone()),
                 _ => None,
             })
             .or_else(|| {
                 data.message.content.iter().find_map(|b| match b {
-                    ContentBlock::Text(t) => Some(truncate_chars(&t.text, 300)),
+                    ContentBlock::Text(t) => Some(t.text.clone()),
                     _ => None,
                 })
             });
+        // 失败原因：优先官方给的用户可见 reason，退而用 `code: name`（用户要「失败原因」）。
+        let error_text = data.error.as_ref().map(|e| {
+            e.reason
+                .clone()
+                .unwrap_or_else(|| format!("{}: {}", e.code, e.name))
+        });
         let diffs = fold_diffs(data.meta.as_ref());
         let start_time = self.msgs[idx].time;
+        // 行级补全：失败原因与轮/步（call 侧已经写了，这里只是兜底补缺）。
+        self.msgs[idx].error = error_text.clone();
+        if self.msgs[idx].turn.is_none() {
+            self.msgs[idx].turn = Some(data.turn);
+        }
+        if self.msgs[idx].step.is_none() {
+            self.msgs[idx].step = Some(data.step);
+        }
         if let Some(tool) = self.msgs[idx].tool.as_mut() {
             // 时长 = result.time − call.time；回放/时钟错乱时 saturating 归 0（不可靠）。
             tool.duration_ms = time.saturating_sub(start_time);
             tool.is_error = is_error;
+            tool.error = error_text;
             tool.result = result_text;
             tool.diffs = diffs;
+            // 原样 meta（含 fs 工具的完整 diff 正文）：库里要能回答「到底改了什么」。
+            tool.meta = data.meta.clone();
         }
         if is_error {
             self.errors += 1;
         }
     }
 
-    /// 追加一行并维护"消息数"统计（User/Assistant 行才占；Reasoning/Tool/Notice 不占）。
+    /// 追加一行并维护"消息数"统计（User/Assistant 行才占；其余种类不占——它们不是对话消息）。
     pub(super) fn push_row(&mut self, item: MsgItem) {
         if matches!(item.kind, MsgKind::User | MsgKind::Assistant) {
             self.messages += 1;
@@ -193,16 +289,44 @@ impl Folder {
         self.msgs.push(item);
     }
 
+    /// 折一行系统小字（compaction / 重试等；text 是**一行简述**，故仍截断）。
     pub(super) fn push_notice(&mut self, seq: u64, time: u64, text: String) {
+        self.push_notice_with(seq, time, text, None);
+    }
+
+    /// 同上，但带**失败原因**（重试/本地失败等：`error` 列单独存，导出与监控页可直接筛）。
+    pub(super) fn push_notice_with(
+        &mut self,
+        seq: u64,
+        time: u64,
+        text: String,
+        error: Option<String>,
+    ) {
         self.push_row(MsgItem {
             kind: MsgKind::Notice,
-            text: truncate_chars(&text, 200),
+            text: truncate_chars(&text, 500),
             reasoning: None,
             usage: None,
             stream: None,
             tool: None,
             time,
             seq,
+            turn: self.open_turn.as_ref().map(|t| t.turn),
+            step: self.cur_step,
+            source: String::new(),
+            error,
         });
     }
+}
+
+/// `MessageSource` → 它的 wire kind 文本（如 `user` / `model` / `runtime-context`）。
+///
+/// 为什么用 serde 序列化而不是穷尽 match：枚举用 `#[serde(tag = "kind", rename_all = "kebab-case")]`
+/// 定义，序列化结果就是 wire 上的文本——**单一真源**，将来加变体不用在这里补一行
+///（这类「第四处维护点」正是本项目反复吃亏的地方）。
+fn source_kind_of(source: &MessageSource) -> String {
+    serde_json::to_value(source)
+        .ok()
+        .and_then(|v| v.get("kind")?.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
