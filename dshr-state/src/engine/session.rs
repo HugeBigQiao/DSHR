@@ -50,9 +50,16 @@ pub struct SessionState {
     /// 本地合成事件的 seq（Fake 模式回显用户行用）。
     seq: u64,
     /// 上次**发给 UI** 的快照（相同则不发，省掉无变化事件的开销）。
+    ///
+    /// 这是**唯一**参与判定的基线：`take_changed` 只拿它比。
     last_sent: Option<SessionSnapshot>,
-    /// 上次**落库**的快照（比 `last_sent` 更保守：落库要考虑 WAL 与事务成本，
-    /// 但当前两者同步触发；分开留字段是为了将来做落库节流而不影响 UI 实时性）。
+    /// 上次**落库**的快照。
+    ///
+    /// ⚠️ **当前无人读它**（写入点有：`take_changed` 与 `flush`），而主路径的落库其实发生在
+    /// `engine::registry::emit_changed` 里（直接调 `persist_snapshot`，不经过 `take_changed`），
+    /// 所以连"记录落库进度"这层作用都不完整。留它还是删它属于取舍：
+    /// 删 = 少一个会误导人的字段；留 = 将来做**落库节流**（落库比发 UI 更贵，没必要每次变化都写）
+    /// 时正好需要这个基线。**暂按「注释说明真相、不改行为」处理**，等真做节流时一并落地或删除。
     last_persisted: Option<SessionSnapshot>,
 }
 
@@ -168,16 +175,23 @@ impl SessionState {
     /// UI 收到快照就意味着它看到的状态是持久的；反过来（先发后落）会让崩溃时
     /// UI 显示过一段不存在的历史。
     pub fn take_changed(&mut self, store: Option<&Store>) -> Option<SessionSnapshot> {
+        // 方法：先取一份**当前全量快照**，与上次发出的那份整体比较——相等就当没变化。
+        // 为什么用「整份比较」而不是打脏标记：快照是纯数据（`PartialEq` 派生），比较一处就够；
+        // 而脏标记要在每个 `on_*` 里维护，漏一个地方就会**该发的不发**（那种 bug 表现为界面静止）。
+        // 代价是每次通知都构造一次快照（几 KB 的 clone）——在「单会话几十条消息」的规模下可忽略。
         let snap = self.folder.snapshot();
         if self.last_sent.as_ref() == Some(&snap) {
             return None;
         }
         // 落库失败不打断会话：打一行 stderr 继续（错误面留给监控页）。
+        // 为什么接受这个取舍：落库是**观测与复原**，而当前这条路径上的会话还在进行——
+        // 一次写盘失败不该让用户正在跑的对话中断（wire-log 里仍然无损，事后可回放补库）。
         if let Some(db) = store {
             if let Err(e) = db.persist_snapshot(&snap) {
                 eprintln!("[engine] 落库失败（忽略继续）：{e}");
             }
         }
+        // 两份 clone 是必要的：一份进字段当基线，一份返回给调用方发事件（`Some(snap)`）。
         self.last_persisted = Some(snap.clone());
         self.last_sent = Some(snap.clone());
         Some(snap)
@@ -188,9 +202,12 @@ impl SessionState {
     /// 为什么需要：`Stop`/异常退出时最后一次变化可能刚好被脏检测跳过，
     /// 但「会话已经结束」这个事实需要落盘。store 是整体替换语义，重复 persist 幂等。
     pub fn flush(&mut self, store: Option<&Store>) {
+        // 空 id = 这个会话态还没接上真实会话（`SessionState::new(SessionId::new(""))` 之类）：
+        // 落库会撞主键/外键，直接跳过（与 `push_local_notice` 的守卫同一理由）。
         if self.id.as_str().is_empty() {
             return;
         }
+        // 不做脏检测，无条件写一次：此刻关心的是「最终态落盘」，而不是「有没有变化」。
         let snap = self.folder.snapshot();
         if let Some(db) = store {
             if let Err(e) = db.persist_snapshot(&snap) {

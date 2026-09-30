@@ -24,6 +24,13 @@ use crate::snapshot::{MsgItem, MsgKind, ToolItem};
 
 impl Folder {
     pub(super) fn on_turn_end(&mut self, time: u64, data: &TurnEndData) {
+        // 结算 = 把「进行中轮」（`open_turn`，它累积了本轮 usage）搬进 `closed_turns`。
+        // 三种情况都要能收尾（**顺序**就是下面的分支顺序）：
+        //   ① 轮号一致 → 正常结算：起点与 usage 都取自 `open_turn`；
+        //   ② 轮号不一致（截断日志/跨段拼接里冒出一个新的 end：旧轮还没收到 end 就先来了别的轮的）
+        //      → 旧轮按「未结算」先收尾，再给这个 end 造一条只有结束侧的记录。宁可多一行，
+        //      也不要把两个轮的 usage 错配到一起（那会让成本统计整体偏掉）；
+        //   ③ 压根没有 `open_turn`（日志从中间开始，或只截到 end）→ 也只造结束侧记录。
         let mut usage = UsageAgg::default();
         let mut start_time = None;
         if let Some(open) = &self.open_turn {
@@ -42,6 +49,9 @@ impl Folder {
             }
         }
         self.open_turn = None;
+        // 错误轮单独计数：这是 `errors` 的两个口径之一（另一个是工具失败，见 `on_tool_result`）。
+        // 单独计而不是事后扫字符串，是因为「一轮结束得不好」与「某个工具失败」在语义上不同，
+        // 而下游（监控页/导出）要能分开看（§8.3）。
         if matches!(data.reason, TurnEndReason::Error { .. }) {
             self.errors += 1;
         }
@@ -64,6 +74,11 @@ impl Folder {
     /// 了什么」的事实，此前 `return` 掉之后库里与导出里都没有，只能回 wire log 里翻。
     /// **显示策略归 UI**（默认不渲染 Injected 行），记录与显示从此分开。
     pub(super) fn on_user_message(&mut self, seq: u64, time: u64, msg: &Message) {
+        // 两道闸门，顺序不能换：
+        // ① 角色：`role != user` 的帧（官方偶尔把别的角色也走这个通道）不从这条路入流；
+        // ② 来源：`source.kind = user` 才是人类输入，其余都是程序化注入。
+        // 两者**都入流**，只是 kind 不同（User / Injected）——「记录全部、显示靠 UI 过滤」的分工
+        // 就落在这两行上（2026-09-29 用户要求「能记多少记多少」）。
         if msg.role != MessageRole::User {
             return;
         }
@@ -100,6 +115,8 @@ impl Folder {
         turn: Option<u64>,
         step: Option<u64>,
     ) {
+        // 注入行也保真：正文与思考照取（如 runtime-context 的 sections 会被拼成文本），
+        // 只是 kind 记 `Injected`——它的价值在「模型当时看到了什么」，不在聊天视图里好不好看。
         let text = text_of(&msg.content);
         let reasoning = reasoning_of(&msg.content);
         self.push_row(MsgItem {
@@ -174,6 +191,8 @@ impl Folder {
         time: u64,
         data: &AssistantAttemptData,
     ) {
+        // 只落「轮/步 + 流摘要」，不产正文：这次尝试**没有**要展示的消息（官方语义就是如此），
+        // 所以正文留空、思考留空，靠 `stream` 里的 chunk 数与首 token 时间说明「确实跑过」。
         self.push_row(MsgItem {
             kind: MsgKind::Attempt,
             text: String::new(),
@@ -191,6 +210,12 @@ impl Folder {
     }
 
     pub(super) fn on_tool_call(&mut self, seq: u64, time: u64, data: &ToolCallData) {
+        // 方法：**先挂起一行**（只有参数，结果字段留空），并把行号记进 `tool_index`，
+        // 等 `tool/result` 回来时按 callId 回填。
+        // 为什么这样：call 与 result 是**两条独立事件**（中间可能隔很久，甚至永远不来——
+        // 工具被中断时），先立行才能让「调用了但没结果」在界面上有个位置；
+        // 也正因为要等回填，工具行只能变成两条事件合并的结果，不能等 result 才一次建行。
+        // 目的：行序 = 事件序（时间线可靠），且统计（工具数/失败数/耗时）能逐条累计。
         self.tool_calls += 1;
         let idx = self.msgs.len();
         self.msgs.push(MsgItem {
@@ -223,6 +248,12 @@ impl Folder {
     }
 
     pub(super) fn on_tool_result(&mut self, time: u64, data: &ToolResultData) {
+        // 方法（三步）：① 从内容块里抠出 `callId` 当配对键 → ② 用索引找到挂起的那一行 →
+        // ③ 回填结果/时长/失败原因/原样 meta。
+        // 为什么键要抠：`tool/result` 的信封里**没有** callId，它藏在消息内容唯一的 tool-result
+        // 块里（协议如此），所以配对必须读内容而没法只看元数据。
+        // 目的：工具事实（成功/失败/耗时/改了哪些文件）只有在配对后才是完整的，
+        // 而它们正是 `tool_calls` / `file_ops` 两张表的唯一来源。
         // 配对键：tool/result 不带 callId，call_id 在消息内容唯一的 tool-result 块里。
         let Some(block) = data.message.content.iter().find_map(|b| match b {
             ContentBlock::ToolResult(t) => Some(t),
@@ -235,6 +266,8 @@ impl Folder {
             // result 先于 call / 跨日志片段（孤 result）：没有挂起行可补，忽略。
             return;
         };
+        // 失败判据取两个来源的**或**：信封上的 error（结构化失败）与块上的 isError（工具自己
+        // 报的失败）。两者都可能单独出现——只取一个就会漏掉另一类失败。
         let is_error = data.error.is_some() || block.is_error == Some(true);
         // 结果正文 = tool-result 块内首文本块（**不截断**）；兼容旧形状：退而取消息顶层文本块。
         let result_text = block
@@ -283,6 +316,9 @@ impl Folder {
 
     /// 追加一行并维护"消息数"统计（User/Assistant 行才占；其余种类不占——它们不是对话消息）。
     pub(super) fn push_row(&mut self, item: MsgItem) {
+        // 「消息数」在此处唯一地累加：口径是「只有 User/Assistant 行算对话消息」。
+        // 为什么集中在这里而不是各 `on_*` 里各自加：口径要能被一处读出来，否则加一种行
+        //（Injected/Attempt/Notice）就可能有人顺手把计数也加了，统计从此不可比。
         if matches!(item.kind, MsgKind::User | MsgKind::Assistant) {
             self.messages += 1;
         }

@@ -268,10 +268,16 @@ fn empty_session_id_is_rejected() {
 /// 读回就从「未知」变成「0」；所以六桶列可空，NULL 与 0 语义不同）。
 #[test]
 fn restore_roundtrip() {
+    // 方法：只做「落一份 → 读回来」一个来回，然后**整体比较**（`assert_eq!` 比整个
+    // `SessionSnapshot`），而不是挑几个字段断言。
+    // 为什么要整体比：挑字段的写法只能证明「我想到的那些字段没丢」——而漏掉的恰好是没写进
+    // 断言的那些（这个文件的 sample 快照刻意带上 error/meta/diffs/plan_mode 等边角字段）。
+    // 目的：把「复原」的判据钉成「逐字段相等」，于是任何新增字段忘了落库/读回都会当场失败。
     let store = Store::open_in_memory().expect("内存库");
     let snap = snapshot_v1("s-restore");
     store.persist_snapshot(&snap).expect("落库");
 
+    // 读回走的是 `Store::load_snapshot`（子表 + meta_json 拼装），而不是复用内存里的那份。
     let back = store
         .load_snapshot("s-restore")
         .expect("读回应成功")

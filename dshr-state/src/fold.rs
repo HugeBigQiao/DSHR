@@ -121,6 +121,12 @@ impl Folder {
     /// 折叠一条已解析的会话事件（事件不含 sessionId，如需快照带 session_id 请用
     /// `push_wire_line` / `push_notification`，或事后从通知侧补）。
     pub fn push_event(&mut self, ev: &SessionEvent) {
+        // 方法：一个大 `match`，复杂的类型交给 `fold/event.rs` 的 `on_*`，只有一两行的就地处理。
+        // 为什么这么分：`SessionTitle` / `PlanMode` 这种「记住最后一个值」的事件，为它开一个函数
+        // 反而把「覆盖式、无增量」这个关键语义藏进另一个文件；而工具配对、轮结算那种多步逻辑
+        // 留在本文件会把编排淹没在细节里。判断标准是**这段逻辑能不能独立看懂**。
+        // 目的：把所有事件类型收在一处——读这一个函数就知道「哪些事件会改变折叠态」，
+        // 新增事件时也只需在这里决定一次「折还是忽略」。
         // 先记账"见过的最大 seq"：本地合成行靠它取一个不撞主键的序号（见 `max_seq` 字段）。
         self.max_seq = self.max_seq.max(ev.seq());
         use SessionEvent::*;
@@ -221,7 +227,12 @@ impl Folder {
                     format!("compaction 摘要：{}", first.unwrap_or_default()),
                 );
             }
-            // —— 以下事件族 s1 忽略（UI/统计尚未消费，注释即扩展点；s2 落库时按事实表再评估）——
+            // —— 以下事件族 s1 忽略。**为什么可以忽略**：wire-log 里原始帧是无损的，
+            // 折叠只产出「UI 与统计当下要看的东西」；忽略只是「不折进快照」，不是丢数据。
+            // 每一条后面的注释就是它的扩展点：将来要做任务视图/交付卡片/成本记账时，
+            // 从这里开始，不必去翻官方事件表。
+            // 例外（下面单独处理的几个）：凡是「耗时/成本/失败」相关的事实都折了，
+            // 因为那些恰好是「不折就完全不可见」的信息（wire 上没有聚合字段）。
             CompactionPrune { .. } => {} // 剪枝计量（影子价格）是内部成本记账，无折叠价值。
             TodoWrite { .. } => {} // todo 整表快照是"日志 UI 状态"（官方注释），非消息流；s4 任务视图。
             FeedbackRecord { .. } => {} // log-only（官方：永不进模型上下文/历史）。
@@ -417,7 +428,9 @@ impl Folder {
             messages: self.messages,
             tool_calls: self.tool_calls,
             usage: self.usage.clone(),
-            // 两个耗时桶 s1 恒 0：事件无可靠起止对/时间差不可靠，s2 落库后校准（见 snapshot.rs）。
+            // 两个耗时桶在这里恒 0（事件流没有可靠的起止配对，重放时 event time 也不可信）；
+            // 替代数据在库里：`requests.duration_ms`（整次 prompt）与 `tool_calls.duration_ms`
+            //（逐个工具）。详见 `snapshot.rs` 里 SessionStats 这两个字段的说明。
             llm_ms: 0,
             tool_ms: 0,
             errors: self.errors,

@@ -162,11 +162,17 @@ impl Store {
     /// 老库（v1）缺 `sessions.meta_json` / `tool_calls.error` 两列，这里补上——
     /// **用户的历史会话在库里**，不能靠删库升级（DESIGN §8.1 的「可整体删除」是兜底不是流程）。
     pub fn init_schema(&self) -> Result<()> {
+        // ① 先无条件跑一遍建表脚本：里面全是 `CREATE TABLE IF NOT EXISTS`，新库一次建齐、
+        // 老库原样通过——这一步不是迁移，只负责「结构存在」。
         self.conn.execute_batch(SCHEMA)?;
+        // ② 版本号直接用 SQLite 自带的 `PRAGMA user_version`（整数，存在库头里）：
+        // 不必再建一张元数据表，也不会与业务表混在一起。
         let version: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version < 2 {
+            // ③ 每条迁移都先探测列是否存在再 `ALTER`：`ALTER TABLE ADD COLUMN` 对已存在的列是**报错**
+            // 而不是忽略，所以「老库」与「上次迁移到一半的库」都要能安全重跑（幂等）。
             for (table, column, ddl) in schema::MIGRATIONS_V2 {
                 if !self.has_column(table, column)? {
                     self.conn
@@ -174,6 +180,8 @@ impl Store {
                 }
             }
         }
+        // ④ 版本号**最后**写：于是「迁移中途崩了」下次启动会重跑（③ 的探测保证幂等），
+        // 而不是被一个提前写好的版本号骗过去、永久停在半迁移状态。
         if version < schema::SCHEMA_VERSION {
             self.conn
                 .execute_batch(&format!("PRAGMA user_version = {}", schema::SCHEMA_VERSION))?;
@@ -183,10 +191,13 @@ impl Store {
 
     /// 该表有没有这一列（迁移用：`ALTER TABLE ADD COLUMN` 在列已存在时会报错，故先探测）。
     fn has_column(&self, table: &str, column: &str) -> Result<bool> {
+        // 用 `PRAGMA table_info` 而不是「`SELECT` 一下看报不报错」：前者是查结构的正规入口，
+        // 不依赖 SQLite 的错误文案（文案随版本变），也不必引入匹配错误码的额外依赖。
         let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
         // PRAGMA table_info 的列序：cid, name, type, notnull, dflt_value, pk。
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
+            // 列 1 = name。
             let name: String = row.get(1)?;
             if name == column {
                 return Ok(true);
@@ -227,6 +238,11 @@ impl Store {
             "sandbox_mode": snap.sandbox_mode,
         })
         .to_string();
+        // 五步同事务，顺序**有约束**：`sessions` 必须先落——其余四张表的行都带 `session_id`
+        // 外键指向它，反序会撞 `FOREIGN KEY constraint failed`（见 AI-LOG §2.6③）。
+        // 后四步彼此无关，它们都是「按 session_id 整表替换」。
+        // 为什么必须同事务：中途失败会留下「会话头换了、消息还是旧的」这种半截状态，
+        // 而复原（`load_snapshot`）会把两者拼起来显示——不一致的数据比没有数据更危险。
         let tx = self.conn.unchecked_transaction()?;
         upsert_session(
             &tx, snap, created_at, updated_at, last_seq, status, &meta_json,
@@ -235,6 +251,7 @@ impl Store {
         replace_turns(&tx, &snap.session_id, &snap.turns)?;
         replace_tool_calls(&tx, &snap.session_id, &snap.messages)?;
         replace_file_ops(&tx, &snap.session_id, &snap.messages)?;
+        // 提交：这之前任何一步 `?` 提前返回都会让事务在 Drop 时回滚，不会留下半截数据。
         tx.commit()?;
         Ok(())
     }
@@ -248,6 +265,8 @@ impl Store {
     /// 返回：`Ok(None)` = 库里没有这个会话；`Ok(Some(snapshot))` = 复原出的快照
     ///（按 seq 排序；`last_request`/`stats`/模式从 `meta_json` 读，老库缺字段则取默认值）。
     pub fn load_snapshot(&self, session_id: &str) -> Result<Option<SessionSnapshot>> {
+        // ① 先读会话头（`meta_json` 顺带取出，省一次查询）。先判定「有没有这个会话」再读子表：
+        // 不存在的会话直接 `Ok(None)`，省掉两次必然为空的子表扫描。
         let row = self
             .conn
             .query_row(
@@ -267,6 +286,10 @@ impl Store {
             return Ok(None);
         };
 
+        // ② 消息流按 `seq` 升序读：与在线折叠（fold 按事件顺序产出行）同一个顺序，
+        // 所以复原出来的列表与关掉之前的 UI 逐行一致。
+        // ⚠️ 下面按**列位序**取值（rusqlite 的 `get(0)`…`get(28)`），与这条 SELECT 的列序强耦合：
+        // 加列/调序必须两处同改，而编译器不会替你发现——改动时先看这里的注释再看 SQL。
         let mut messages: Vec<MsgItem> = Vec::new();
         let mut stmt = self.conn.prepare(
             "SELECT seq, time, turn, step, kind, source, text, reasoning, error,
@@ -308,8 +331,12 @@ impl Store {
                     .flatten()
                     .and_then(|s| serde_json::from_str(&s).ok()),
             });
+            // token 六桶与流摘要各自成组，交给专用函数读（列位集中在那两处，
+            // 免得这个循环里排 29 个连续索引、看不出哪列属于什么）。
             let usage = token_usage_from_row(&r)?;
             let stream = stream_from_row(&r)?;
+            // `i64 → u64` 一律先 `max(0)`：SQLite 没有无符号整数，列里一旦出现负数，
+            // `as u64` 会绕成天文数字（时间戳会显示成公元几亿年）。钳到 0 = 当作未知。
             messages.push(MsgItem {
                 kind: kind_from_text(&r.get::<_, String>(4)?),
                 text: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
@@ -326,6 +353,8 @@ impl Store {
             });
         }
 
+        // ③ 轮结算单独一条查询，不与消息 join：两者是一对多（一轮多条消息），join 会把轮级列
+        // 在每条消息上重复一遍，还得在循环里去重。分开读则两边都是「一行一次」，最省事也最省内存。
         let mut turns: Vec<TurnStat> = Vec::new();
         let mut stmt = self.conn.prepare(
             "SELECT turn, started, ended, reason, input, output, cache_read, cache_write,
@@ -350,7 +379,10 @@ impl Store {
             });
         }
 
-        // meta_json：老库为空串或字段缺失 → 取默认（serde default），不让复原失败。
+        // ④ meta_json 是**会话级聚合**（stats / last_request / 模式）用一格 JSON 装下的结果：
+        // 加字段不必改 schema。代价是没有类型约束，所以下面一律「取不到就用默认值」——
+        // 老库（加列迁移之前）空串、字段被删、JSON 被人手改坏，都只让**那一部分**退回默认，
+        // 而不是整个复原失败（用户要的是「打开还能看到记录」，不是「数据必须完好」）。
         let meta: serde_json::Value = meta_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
@@ -386,6 +418,10 @@ impl Store {
 
     /// 库里有哪些会话（复原时的目录：按最后更新倒序，最近用过的在前）。
     pub fn load_session_ids(&self) -> Result<Vec<String>> {
+        // 只取 id、不带内容：这是「有哪些会话」的目录查询（复原选择用），要看内容再按 id 调
+        // `load_snapshot`——为列一份清单而把所有会话的历史读进内存是不必要的。
+        // 排序 `updated_at DESC` 加 id 兜底：最近用过的在前；同一毫秒的两个会话靠 id 定序，
+        // 于是同样的库每次读出同样的顺序（可复现，diff 才有意义）。
         let mut stmt = self
             .conn
             .prepare("SELECT id FROM sessions ORDER BY updated_at DESC, id")?;
@@ -405,10 +441,14 @@ impl Store {
     /// 这里只建一行空壳（created_at/updated_at = 落库时刻），后续 `persist_snapshot` 会把它
     /// 补成完整行（UPSERT 且不覆盖 created_at）。
     pub fn ensure_session(&self, session_id: &str) -> Result<()> {
+        // 空 id = 调用方还没接上会话（如握手期间）：没有 id 建不出行，静默返回即可，
+        // 让上游去处理这个边界没有意义（它本来就没有可用的 id 可用）。
         if session_id.is_empty() {
             return Ok(());
         }
         let now = sql_i64(now_ms());
+        // `INSERT OR IGNORE`（**不是** `OR REPLACE`）：壳行只允许「不存在时补上」。
+        // 已存在的行带 title/status/last_seq 等真数据，在这里被整行重置会把它们抹掉。
         self.conn.execute(
             "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, last_seq)
              VALUES (?1, ?2, ?2, 0)",
@@ -438,6 +478,9 @@ impl Store {
     ) -> Result<()> {
         // 请求可能发生在「会话还没落过任何快照」之前（尤其失败的那次）→ 先补壳行满足外键。
         self.ensure_session(session_id)?;
+        // 直接 INSERT 而不 UPSERT：同一个 method 会被合法地调用多次（重试、多轮），
+        // 请求事实是**追加式日志**，覆盖反而会丢掉「重试了几次」这条信息。
+        // `success` 存 0/1（SQLite 没有布尔类型），`turn` 在「还没结算就失败了」时为 NULL。
         self.conn.execute(
             "INSERT INTO requests (session_id, runtime_id, turn, method, time, duration_ms,
                                    success, error_message)
@@ -470,6 +513,10 @@ impl Store {
             .into_iter()
             .map(str::to_string)
             .collect();
+        // 表头取自语句本身（`column_names`）而不是另写一份常量：它就是 SQL 里列序的**运行时真相**，
+        // 与下面按列位序取值天然一致；手抄一份迟早与 SQL 漂开，而漂开的表现是「表头与数据错位」。
+        // 取值统一转文本：CSV 没有类型，这里做一次显式的 `Value → String`（含 NULL → 空串），
+        // 免得下游再按「看起来像数字」猜一遍类型。
         let width = headers.len();
         let mut out = Vec::new();
         let mut rows = stmt.query([])?;

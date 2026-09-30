@@ -72,7 +72,11 @@ pub(crate) fn replace_messages(
     msgs: &[crate::snapshot::MsgItem],
 ) -> Result<()> {
     tx.execute("DELETE FROM messages WHERE session_id = ?1", params![sid])?;
+    // 先删后逐行插 = **整表替换**语义（快照本来就是全量视角，fold 每次从事件流重建），
+    // 而不是逐行 UPSERT：后者要主键比对，还会留下「重放后已不存在」的旧行（比如轮被截断）。
     for m in msgs {
+        // 三个可选组先各取一次引用：下面 30 个参数绝大多数来自它们，
+        // 逐处 `m.tool.as_ref()` 会让「这列属于哪一组」变模糊。
         let tool = m.tool.as_ref();
         let usage = m.usage.as_ref();
         let stream = m.stream.as_ref();
@@ -114,12 +118,16 @@ pub(crate) fn replace_messages(
                 sql_i64o(stream.map(|s| s.text_chars)),
                 sql_i64o(stream.map(|s| s.reasoning_chars)),
                 sql_i64o(stream.map(|s| s.tool_args_chars)),
+                // 工具有关的列：非工具行整段为 NULL。例外是 `tool_is_error` 与 `tool_duration_ms`，
+                // 它们用 0 而不是 NULL——对「不是工具行」而言，这两个值没有「未知」的含义可表达。
                 tool.map(|t| t.call_id.clone()),
                 tool.map(|t| t.name.clone()),
                 tool.map(|t| t.arguments.clone()),
                 tool.and_then(|t| t.result.clone()),
                 tool.map_or(0, |t| if t.is_error { 1 } else { 0 }),
                 sql_i64(tool.map_or(0, |t| t.duration_ms)),
+                // `meta` 以原样 JSON 字符串存（含 diffs 与官方后来加的字段）：`diffs` 是它的投影，
+                // 复原时从 meta 重折一次即可（见 `Store::load_snapshot`），不另存一份以免两者漂开。
                 tool.and_then(|t| t.meta.as_ref())
                     .map(|m| m.to_string()),
             ],
@@ -198,7 +206,8 @@ pub(crate) fn replace_turns(
 }
 
 /// tool_calls 替换：DELETE 该会话全部 → 从消息流的 Tool 行整插。
-/// `arguments`/`result` 已在 fold 截断（≤300 字符）；`meta_json` 暂不写（见 DDL 注释）。
+/// `arguments`/`result` **全文落库**（用户 2026-09-29 要求「能记多少记多少」；fold 曾截断到
+/// 300 字符，该截断已取消），`meta_json` 存工具的原样 meta（含 `diffs`）。
 ///
 /// 为什么需要：工具事实是「每工具名多少次、成功失败、耗时」统计的唯一来源；
 /// 行从 `MsgItem` 的 Tool 行来而不是另建集合——fold 已经把 call↔result 配对完成。
@@ -210,6 +219,8 @@ pub(crate) fn replace_tool_calls(
     msgs: &[crate::snapshot::MsgItem],
 ) -> Result<()> {
     tx.execute("DELETE FROM tool_calls WHERE session_id = ?1", params![sid])?;
+    // 两重过滤：`kind == Tool` 挑出工具行；`tool` 为 `None` 的行跳过（`Tool` 行**应当**带卡片，
+    // 这里是防御——宁可少一行工具事实，也不要为一条畸形数据让整个落库事务回滚）。
     for m in msgs {
         if m.kind != MsgKind::Tool {
             continue;
@@ -251,6 +262,8 @@ pub(crate) fn replace_file_ops(
     msgs: &[crate::snapshot::MsgItem],
 ) -> Result<()> {
     tx.execute("DELETE FROM file_ops WHERE session_id = ?1", params![sid])?;
+    // 一行 = 一个文件变更：把工具卡片里的 `diffs` 摊平。所以「同一个工具改了 3 个文件」在这里是
+    // 3 行（工具名与轮号重复出现），这是有意的——按文件聚合（哪些文件被改得最多）才是查询目标。
     for m in msgs {
         if m.kind != MsgKind::Tool {
             continue;
@@ -290,6 +303,10 @@ pub(crate) fn replace_file_ops(
 /// 入参 `name`：工具名（如 `edit_file` / `write_file` / `str_replace_editor`）。
 /// 返回：归类串；无法归类时返回 `"diff"`（含查询类工具的 diff 摘要与未来的新工具）。
 pub(crate) fn infer_op(name: &str) -> &'static str {
+    // 分支顺序**有意如此**（先说清楚，免得后来者当成 bug）：`str_replace_editor` 会先命中
+    // `contains("edit")`——因为名字里的 `editor` 含 `edit`——于是它归类成 `edit` 而永远走不到
+    // `str_replace` 那条分支。`op` 只是展示归类，粗判无害；要精确得有一张「工具名 → 操作」的
+    // 映射表，那要等对照官方工具名清单之后再做（现在没有权威清单，猜表更糟）。
     if name.contains("edit") {
         "edit"
     } else if name.contains("write") {

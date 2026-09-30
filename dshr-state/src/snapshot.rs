@@ -149,6 +149,9 @@ pub struct UsageAgg {
 impl UsageAgg {
     /// 并入一次 assistant/message 的 usage；adapter 未报的可选桶按 0 计。
     pub fn add(&mut self, u: &TokenUsage) {
+        // 未报的桶按 0 计：**聚合值表达不了「未知」**——求和里没有第三个状态可言。
+        // 但「这个桶到底报没报」在**明细层**仍然保留：库里 `messages` 的 token 六桶列可空
+        //（见 `store/schema.rs` 的注释），所以复原时「未知 vs 报 0」的区分不会丢，聚合层放弃它是合适取舍。
         self.input += u.input_tokens;
         self.output += u.output_tokens;
         self.total += u.total_tokens.unwrap_or(0);
@@ -185,10 +188,13 @@ pub struct SessionStats {
     pub tool_calls: u64,
     /// 全部 assistant/message 的 token 六桶合计。
     pub usage: UsageAgg,
-    /// LLM 耗时毫秒：s1 恒 0——单靠事件无可靠起止对（assistant/message 无配对计时），
-    /// s2 落库后用 step/request 配对/精确计时校准（DESIGN.md §8.3）。
+    /// LLM 耗时毫秒：**目前恒 0**（`fold.rs` 里写死）——事件流里没有「请求发出→首个产出」的
+    /// 可靠配对（`assistant/message` 不带起止时刻，重放时事件 time 也不可信）。
+    /// 替代数据已经有了：`requests.duration_ms`（engine 记的端到端耗时）与快照的
+    /// [`RequestView`]（起点时刻/seq）。要精确的模型耗时需要按官方 request/response 事件对新增折叠。
     pub llm_ms: u64,
-    /// 工具总耗时毫秒：s1 恒 0——事件时间差不可靠（重放/时钟），s2 落库后校准。
+    /// 工具总耗时毫秒：**目前恒 0**，但替代数据在库里——`tool_calls.duration_ms` 直接 SUM
+    /// 即可（见 §8.3 聚合）；这里留 0 是因为 fold 阶段拿不到可信时钟差（重放/时钟错乱）。
     pub tool_ms: u64,
     /// 错误计数：tool/result is_error + turn/end reason=error（tool 未配对不重复计）。
     pub errors: u64,

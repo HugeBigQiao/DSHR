@@ -15,11 +15,14 @@
 // 主键思路（UI/查询一律按会话展开）：
 //   turns / tool_calls 用 (session_id, …) 复合主键，不要全局自增 id；
 //   file_ops 无自然唯一键 → 隐式 rowid + (session_id, path) 索引（按 path 聚合）；
-//   requests / runtime_logs 尚无写入方，建表留扩展点（请求层折叠未做 / stderr 通道未接）。
+//   requests / runtime_logs 用自增 id（追加式日志：同一次请求可能重试、同一条 stderr 可重复）。
 //   sessions 的 created_at 由首条消息时间推出；last_seq = 快照最大消息 seq（增量书签）。
+//   八张表现在**都有写入方**（2026-09-29）：requests ← engine 记每次 prompt 的成败/耗时；
+//   runtime_logs ← engine 记 stderr 与进程退出；messages ← 逐条对话（除逐 chunk）。
 pub(crate) const SCHEMA: &str = r#"
--- runtime 实例事实（沿用 v3）：s2 只建表——s1 快照无 runtime 元数据，
--- s3 接 UI 时由 runtime.rs 侧写入（command/args/env 存 JSON 文本）。
+-- runtime 实例事实：写入方 = engine（`upsert_runtime`，写 id/name/state 与生命周期）。
+-- `command` / `args` / `env` 仍为空（JSON 文本待写）：它们要在真正 spawn 的地方取，
+-- 而那里目前只把命令行拼好就用了——等要做「复现一次 runtime 启动」时再补。
 CREATE TABLE IF NOT EXISTS runtimes (
     id         TEXT PRIMARY KEY,
     name       TEXT,
@@ -125,15 +128,14 @@ CREATE TABLE IF NOT EXISTS turns (
     PRIMARY KEY (session_id, turn)
 );
 
--- 工具调用事实：主键 (session_id, call_id)。arguments/result 存 fold 已截断的摘要
--- （≤300 字符，全文在 wire log）；meta_json 暂不写——s1 ToolItem 只留 diffs 摘要
--- （FileDiff），原样 meta JSON 在 wire log（§11.2 tool_calls.meta 预留原样 JSON）。
+-- 工具调用事实：主键 (session_id, call_id)。**全文落库**（用户 2026-09-29 要求「能记多少记多少」，
+-- fold 曾经把 arguments/result 截断到 300 字符，该截断已取消）；meta_json 存原样 meta（如完整 diff）。
 CREATE TABLE IF NOT EXISTS tool_calls (
     session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     call_id      TEXT NOT NULL,                     -- tool/call data.callId
     name         TEXT NOT NULL,                     -- 工具名
-    arguments    TEXT NOT NULL,                     -- 参数截断摘要
-    result       TEXT,                              -- 结果截断摘要；挂起调用（result 未到）= NULL
+    arguments    TEXT NOT NULL,                     -- 参数全文
+    result       TEXT,                              -- 结果全文；挂起调用（result 未到）= NULL
     is_error     INTEGER NOT NULL DEFAULT 0,        -- 0/1：tool/result error 或 isError=true
     duration_ms  INTEGER NOT NULL DEFAULT 0,        -- result.time − call.time（saturating，回放不可靠时 0）
     error        TEXT,                              -- 失败原因（官方 error.reason，退而 `code: name`）
@@ -142,8 +144,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 
 -- 文件变更事实（§11.2 新增，自 ToolItem.diffs 展开，一行 = 一个文件变更摘要）。
--- turn 列 s2 恒 NULL：s1 快照的 Tool 行未标注轮号（MsgItem 无 turn 字段），
--- fold 补标注后填；seq = 工具行事件 seq（表内排序/时间线），time = tool/call 时刻。
+-- turn 由 fold 给消息行补的轮号填（2026-09-29 起有值，此前恒 NULL）；
+-- seq = 工具行事件 seq（表内排序/时间线），time = tool/call 时刻。
 CREATE TABLE IF NOT EXISTS file_ops (
     session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     turn          INTEGER,
@@ -156,8 +158,8 @@ CREATE TABLE IF NOT EXISTS file_ops (
 );
 CREATE INDEX IF NOT EXISTS idx_file_ops_session_path ON file_ops(session_id, path);
 
--- runtime stderr 审计（§11.3 系统层）：尚无 stderr 通道（client 未暴露）→ 只建表，
--- s3 接 client 的 stderr 监控后写。
+-- runtime stderr 审计（§11.3 系统层）：写入方 = engine（M3 接通）——它把子进程 stderr 的每一行
+-- 与进程退出原因都记在这里；「界面上一片安静」时有据可查（这正是当初建表留扩展点的理由）。
 CREATE TABLE IF NOT EXISTS runtime_logs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     runtime_id TEXT REFERENCES runtimes(id),

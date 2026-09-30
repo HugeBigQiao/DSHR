@@ -116,6 +116,11 @@ fn tool_result(call_id: &str, text: &str, is_error: bool) -> serde_json::Value {
 /// 这是 fold 的主契约（其余测试都是它的边界情况）。
 #[test]
 fn full_turn_projection() {
+    // 方法：把**一整轮的 9 条真实帧**（轮开 → 步开 → 用户 → assistant → 工具 call → 工具 result
+    // → assistant → 轮结 → 状态）按顺序喂进 `Folder`，再对产出的快照做逐项断言。
+    // 为什么用「整轮」而不是逐事件单测：折叠的价值恰恰在**跨事件的关联**（工具配对、轮结算、
+    // token 归属），单事件测只能证明「没崩」；而这一条能证明「关联算对了」。
+    // 目的：这是 fold 的主契约——其余测试都是在它的基础上各挑一个边界情况（挂起/孤儿/截断/错误）。
     let mut folder = Folder::new();
     let seqs = [
         frame("turn/start", 1, json!({ "turn": 1 })),

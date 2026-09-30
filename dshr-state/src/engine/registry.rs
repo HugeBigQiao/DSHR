@@ -403,7 +403,13 @@ impl Engine {
     /// - **找不到就静默**：不造空快照（那会让 UI 以为会话存在且是空的），也不报错
     ///   （目录由 `ListSessions` 提供，UI 选到的 id 必然来自目录或事件）。
     fn read_snapshot(&mut self, session: &SessionId) -> Vec<EngineEvent> {
+        // 方法：先查内存注册表（快，拿到的是**实时态**），查不到再问库（历史态）。
+        // 为什么顺序不能反：运行中的会话还在变，库里的那份只是「上次落盘的样子」——先查库会让
+        // UI 切到正在跑的会话时看到一段过期历史（随后被下一次推送纠正，表现成闪一下）。
+        // 目的：给 UI 一个「不依赖变更也能拿到当前样子」的入口。它正是「推送只发轻通知」（M6 后半）
+        // 的前提：有了它，UI 才能在收到通知后自己来取，而不是等着被喂整份快照。
         if session.as_str().is_empty() {
+            // 空 id = 握手期的占位会话（还没接上真实会话），没有东西可查，静默。
             return Vec::new();
         }
         // ① 运行中：在注册表里按会话 id 找（一个 runtime 内可并存多会话）。
@@ -416,9 +422,11 @@ impl Engine {
                 }];
             }
         }
-        // ② 库里复原：会话早已结束（或本次应用刚启动）。
+        // ② 库里复原：会话早已结束（或本次应用刚启动过，会话还没被跑起来）。
+        // `load_snapshot` 一次把消息流 + 轮 + 聚合 + 最近请求拼回来，所以它与在线快照**同形**——
+        // UI 不需要为「历史会话」写第二套渲染（也正因如此，这一步不该返回半成品）。
         let Some(db) = self.store.as_ref() else {
-            return Vec::new();
+            return Vec::new(); // 没开库（打开失败过）→ 与「找不到」同样静默，不制造错误面。
         };
         match db.load_snapshot(session.as_str()) {
             Ok(Some(snapshot)) => vec![EngineEvent::SessionLoaded {
@@ -428,7 +436,9 @@ impl Engine {
             }],
             Ok(None) => Vec::new(),
             Err(e) => {
-                // 读库失败不是会话错误：报一行 stderr 并当「没有」处理（UI 侧看到的是没变化）。
+                // 读库失败不是会话错误：报一行 stderr 并当「没有」处理。
+                // 为什么不上报 UI：这是**读取**失败，重试一次多半就好；而弹一条红色错误会让人
+                // 以为会话坏了——实际上 wire-log 与库里的数据都还在（诊断入口在 stderr 与库）。
                 eprintln!("[engine] 拉取快照失败（忽略）：{e}");
                 Vec::new()
             }

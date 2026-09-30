@@ -1,7 +1,7 @@
 //! 落盘数据导出（CSV）：纯函数契约 + 真跑入口。
 //!
-//! 为什么需要（用户 2026-09-29 提出）：库里的事实表（sessions/turns/tool_calls/file_ops/
-//! runtime_logs）与 wire-log 里的逐条历史，目前在 UI 上还没有地方看（监控页未做）。
+//! 为什么需要（用户 2026-09-29 提出）：库里的八张事实表（含逐条对话的 `messages`）与 wire-log
+//! 里的逐条历史，目前在 UI 上还没有地方看（监控页未做）。
 //! 先用 CSV 把它们「倒出来」看：同一组函数将来直接接监控页的历史导出，所以这里测的不是
 //! 一个临时脚本，而是**监控页数据出口的契约**。
 //!
@@ -64,7 +64,7 @@ fn csv_escaping_follows_rfc4180() {
     assert_eq!(file.row_count(), 4, "行数按数据行计（不含表头）");
 }
 
-/// 库表导出：六张事实表都出列，行数与落库一致（**包含还没写入方的两张**）。
+/// 库表导出：**八张**事实表都出列（`messages`/`requests` 也在内），行数与落库一致。
 #[test]
 fn store_tables_export_every_fact_table() {
     let store = Store::open_in_memory().expect("内存库");
@@ -172,6 +172,10 @@ fn replay_splits_by_session() {
 /// 全量导出：库表 + 会话历史都落到磁盘（`export_all` 的端到端契约）。
 #[test]
 fn export_all_writes_everything() {
+    // 方法：造一个**最小但完整**的世界——内存库（落一份快照）+ 临时目录里的一份 wire-log（一条
+    // 用户消息），然后跑 `export_all` 端到端，断言四件事：文件数、确实写到磁盘、BOM、表头稳定。
+    // 为什么用内存库而不是临时文件库：这里要验的是「导出」而不是「SQLite 打开文件」，少一个变量。
+    // 为什么连 BOM 一起断言：它是「给 Excel 打开」的唯一保障，而中文读成乱码极难归因。
     let dir = temp_dir("all");
     std::fs::create_dir_all(&dir).expect("临时目录");
     let wire = dir.join("wire-logs");
@@ -221,6 +225,8 @@ fn export_all_writes_everything() {
 /// 但它本身不烧 token、不起进程，所以随时可跑。
 #[test]
 fn export_real_data_when_requested() {
+    // 门控而不是 `#[ignore]`：`#[ignore]` 要额外敲 `-- --ignored`，而这个开关只需要一个环境变量，
+    // 且**跳过时会打印一句说明**——「没有任何输出」与「跑过但没问题」必须能区分开。
     if std::env::var("DSHR_EXPORT").is_err() {
         println!("（跳过真实导出：设 DSHR_EXPORT=1 才会跑）");
         return;

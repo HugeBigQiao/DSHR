@@ -426,6 +426,48 @@ App::update ── Message 分发：
   └─ Task(Edit)   → composer.perform(action)（Edit::Enter 除外——转 Send）
 ```
 
+### 7.4 文件页与工作区边界（`dshr-state::workspace`）
+
+```
+Files 页（dshr-ui/src/files.rs + files/editor.rs）
+  └─ dshr_state::workspace        ← 唯一的安全边界
+       ├─ ensure_relative(rel)   拒绝绝对路径 / `..` / Windows 前缀组件
+       └─ resolve(rel)           canonicalize 后与工作区根比对（逃逸与符号链接越界都拒绝）
+            └─ 文件系统（根 = raw::workspace_root() = dshr/ 仓库根）
+```
+
+**为什么单独一层**（而不是让 UI 直接 `std::fs`）：路径夹紧属于**一处错就全错**的逻辑——
+每个入口各写一遍，迟早有一个忘了校验，于是静默读写到工作区之外。收在一处后，
+「能不能越界」只由 `resolve` 一个函数回答（`canonicalize` 之后再比前缀，所以符号链接越界也挡得住）。
+
+**现有 API（2026-09-30 盘点：4 项）**：
+
+| 函数 | 语义 | 约束 |
+|---|---|---|
+| `root()` | 工作区根 | 唯一定义处在 `raw::workspace_root()`（`env!("CARGO_MANIFEST_DIR")` 的父目录） |
+| `list_dir(rel)` | 列一层目录 → `Vec<FileEntry>`（叶子名 / `/` 分隔相对路径 / is_dir / size） | 目录在前、名字不分大小写排序；按名字跳过 `IGNORED` |
+| `read_text_file(rel)` | 读 UTF-8 文本 | 非 UTF-8 拒绝；> `MAX_TEXT_BYTES`（2 MiB）拒绝 |
+| `write_text_file(rel, content)` | 覆盖**已存在**的普通文件 | **不新建**；内容 > 2 MiB 拒绝 |
+
+UI 侧只调后三个，且都经 `tokio::task::spawn_blocking`——同步文件系统调用直接在 `update` 里跑会卡住整个窗口
+（与 §7.3 的「IO 结果用消息回流」是同一条纪律）。
+
+**两套路径来源不要混用**：`workspace` 读写的是**用户的工作区**（`dshr/` 仓库本身），
+而 `store` / `record` / `config` / `secrets` / `runtime` 读写的是 `data/` 与 `dsh/`（dshr 自己的数据，
+§8.1）。`IGNORED` 里的 `data` / `dsh` / `target` 正是为了不让文件页暴露这些自家目录——它们与
+`.gitignore` 的 `/data/`、`/dsh/`、`/target/` 基本重合，这也是将来改造忽略规则的依据。
+
+**已知缺口（待办，见 §12.3）**：
+
+| 类别 | 缺口 | 症状 |
+|---|---|---|
+| 能力 | 无新建文件/文件夹、重命名、删除 | 文件页只能改**已存在**的文本文件 |
+| 健壮性 | 保存**非原子**（直接 `std::fs::write`） | 写到一半崩溃/断电会截断用户文件——编辑器最该守的一条 |
+| 规则 | `IGNORED` 是硬编码 5 个名字，按名字匹配、不分层级，也不读 `.gitignore` | 任何层级里叫 `data`/`dsh` 的目录都被隐藏；真正的忽略规则（如子项目自己的 `.gitignore`）不生效 |
+| 编码/体积 | 只认 UTF-8，> 2 MiB 直接拒绝，无只读预览退路 | GBK 文本报「not UTF-8 text」；大文件在 UI 上只是报错 |
+| 外部变更 | 无文件监听 | 文件被别的程序改过，UI 不知道；`Save` 直接覆盖 |
+| 护栏 | **零测试** | 安全边界没有自动化验证（`tests/_conventions.md` 已把「工作区内相对路径边界」列为待测） |
+
 ---
 
 ## 8. 数据罗盘 / 统计域 / 数据管道
@@ -687,6 +729,10 @@ fold（纯函数，可测）      ──► 内存快照：消息流 / turn 统�
 |---|---|
 | README 双语 + 发布准备 | 未做（发布等 SDK 全做完 + 测试重建完） |
 | portable node 自动安装 | 未做（当前 node 缺失时报清晰错误） |
+| `state::workspace` 写能力（新建/重命名/删除 + **原子保存**） | 未做。当前只能覆盖已有文本文件，且保存非原子（§7.4 缺口表）；删除语义（是否进回收站）需先拍板 |
+| `state::workspace` 忽略规则 | 未做。硬编码 5 个名字；可改读 `.gitignore`（与它基本重合），`.git` 与 `node_modules` 仍要单独兜底 |
+| `state::workspace` 契约测试 | 未做（安全边界零护栏）。测点：绝对路径 / `..` / Windows 前缀 / 符号链接逃逸 / 忽略名单 / 体积上限 |
+| `state::workspace` 读侧退路与外部变更 | 未做。非 UTF-8 与 > 2 MiB 目前只有报错（无只读预览）；无文件监听，外部改动会被 `Save` 覆盖 |
 
 ### 12.4 测试策略（2026-09-29 调整）
 
